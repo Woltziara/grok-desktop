@@ -1,0 +1,121 @@
+{
+  "name": "grok-desktop",
+  "version": "1.3.4",
+  "description": "Desktop GUI for the Grok Build coding agent (Electron + ACP)",
+  "main": "electron/main.mjs",
+  "type": "module",
+  "author": "Karman de Lange; Oscar Woltz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Woltziara/grok-desktop.git"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "vite build",
+    "start": "electron .",
+    "preview": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "test": "node --test test/**/*.test.mjs",
+    "test:acp": "node --test test/acp-rpc.test.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "electron": "^35.2.1",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.3",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.karman.grok-desktop",
+    "productName": "Grok Desktop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "shared/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "publish": {
+      "provider": "github",
+      "owner": "Woltziara",
+      "repo": "grok-desktop"
+    },
+    "afterPack": "./scripts/afterPack.cjs",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "GrokDesktop-${version}-Windows-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "differentialPackage": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "artifactName": "GrokDesktop-${version}-Mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "writeUpdateInfo": true
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "artifactName": "GrokDesktop-${version}-Linux-x64.${ext}"
+    }
+  }
+}

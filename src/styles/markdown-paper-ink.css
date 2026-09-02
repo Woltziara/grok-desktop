@@ -1,0 +1,132 @@
+/*
+ * Conversation chrome: ChatGPT / Claude / Codex
+ *   user = right-hand bubble; assistant = left reading column.
+ * Markdown: sindresorhus/github-markdown-css (MIT) — the established GFM look.
+ * Colors remapped onto Wave Paper & Ink. Do not flatten lists/quotes into body text.
+ */
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) {
+  background: transparent;
+  color: var(--wave-ink-strong);
+  font-family: var(--prose-font);
+  font-size: 18px;
+  line-height: 1.7;
+  word-wrap: break-word;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) a {
+  color: var(--wave-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h1,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h2,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h3,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h4,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h5,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) h6 {
+  color: var(--wave-ink-strong);
+  font-family: var(--prose-strong);
+  font-weight: 600;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) ul {
+  list-style-type: disc;
+  padding-left: 2em;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) ol {
+  list-style-type: decimal;
+  padding-left: 2em;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) ul ul {
+  list-style-type: circle;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) ul ul ul {
+  list-style-type: square;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) li {
+  color: var(--wave-ink-strong);
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) li::marker {
+  color: var(--wave-ink-strong);
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) li::before {
+  content: none;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) blockquote {
+  margin: 0.75em 0;
+  padding: 0 1em;
+  color: var(--wave-ink);
+  border-left: 0.25em solid var(--wave-ink-strong);
+  background: transparent;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) :not(pre) > code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--wave-ink-strong);
+  background: color-mix(in srgb, var(--wave-ink) 10%, var(--wave-paper));
+  border-radius: 6px;
+  padding: 0.12em 0.42em;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) pre {
+  font-family: var(--mono);
+  color: var(--wave-ink-strong);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) table th,
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) table td {
+  color: var(--wave-ink-strong);
+  border-color: var(--border);
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) table tr {
+  background: transparent;
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) table tr:nth-child(2n) {
+  background: color-mix(in srgb, var(--wave-ink) 6%, var(--wave-paper));
+}
+
+:is(.msg.grok-prose .markdown-body, .sw-markdown.markdown-body) hr {
+  background: var(--border);
+  border: 0;
+  height: 1px;
+}
+
+/* Codex / ChatGPT: your turn is a right-hand dark bubble. */
+.msg.user-prose {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.msg.user-prose .user-bubble {
+  max-width: min(32rem, 72%);
+  width: fit-content;
+  background: var(--user-bubble);
+  color: var(--user-bubble-fg);
+  border-radius: 22px;
+  padding: 10px 16px;
+}
+
+[data-theme="light"] {
+  --user-bubble: #3b3733;
+  --user-bubble-fg: #faf7f2;
+}
+
+[data-theme="dark"] {
+  --user-bubble: #f0ebe3;
+  --user-bubble-fg: #2a2623;
+}

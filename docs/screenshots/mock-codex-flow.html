@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Codex-flow mock</title>
+<style>
+  :root {
+    --text: #14141c;
+    --text-muted: #5a5a6e;
+    --danger: #b91c1c;
+    --bg: #faf7f2;
+    --code-bg: #eef0f5;
+    --border: #d4d4e0;
+  }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; }
+  .timeline { max-width: 720px; margin: 32px auto; padding: 0 28px 40px; }
+  .msg { margin: 0; padding: 0; border: 0; background: none; }
+  .msg + .msg { margin-top: 14px; }
+  .msg + .inline-activity, .inline-activity + .msg { margin-top: 15px; }
+  .inline-activity + .inline-activity { margin-top: 4px; }
+  .inline-activity { padding-left: 12px; }
+  .inline-activity-toggle { margin: 0; padding: 0; border: 0; background: none;
+    color: var(--text-muted); font-size: 13px; line-height: 1.4; cursor: pointer; text-align: left; }
+  .inline-activity.is-fail .inline-activity-toggle { color: var(--danger); }
+  .copy { float: right; font-size: 11px; opacity: 0; }
+  .msg:hover .copy { opacity: 1; }
+</style>
+<div class="timeline">
+  <article class="msg">先看一下窗口是怎么打开的，再改它默认出现的位置。<span class="copy">Copy</span></article>
+  <div class="inline-activity"><button class="inline-activity-toggle">· 读取了 App.tsx</button></div>
+  <div class="inline-activity"><button class="inline-activity-toggle">· 修改了 App.tsx（+13 −1）</button></div>
+  <div class="inline-activity"><button class="inline-activity-toggle">· 运行了 install-desktop.sh</button></div>
+  <div class="inline-activity is-fail"><button class="inline-activity-toggle">✗ 运行失败</button></div>
+  <article class="msg">改好了：窗口现在会开在屏幕中间。构建那一步失败了，需要再跑一次。</article>
+  <article class="msg user-prose">帮我把默认位置调一下</article>
+</div>

@@ -1,0 +1,686 @@
+/* Grok Desktop chrome, adjusted from Carvis macOS 27 window grammar.
+   Chat prose matches Wave Paper & Ink (Hack + 仓耳今楷, paper #FAF7F2). */
+
+@font-face {
+  font-family: "Hack";
+  src: url("../assets/fonts/hack-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hack";
+  src: url("../assets/fonts/hack-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 仓耳今楷04 各档 usWeightClass 都是 400，必须按文件名挂字重，
+   否则加粗会继续落在 W04。W05 是本机最重的一档。 */
+@font-face {
+  font-family: "JinKai Prose";
+  src: local("TsangerJinKai04 W04"), local("仓耳今楷04 W04");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JinKai Prose";
+  src: local("TsangerJinKai04 W05"), local("仓耳今楷04 W05");
+  font-weight: 600;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JinKai Prose";
+  src: local("TsangerJinKai04 W05"), local("仓耳今楷04 W05");
+  font-weight: 700;
+  font-style: normal;
+}
+
+/* W05 文件自己就是 Regular。单独成族、按 400 用，避免再叠假粗或描边。 */
+@font-face {
+  font-family: "JinKai Strong";
+  src: local("TsangerJinKai04 W05"), local("仓耳今楷04 W05");
+  font-weight: 400;
+  font-style: normal;
+}
+
+:root {
+  --shell-line: rgba(87, 80, 74, 0.14);
+  --shell-sidebar: #f8f4ee;
+  --shell-paper: #faf7f2;
+  --shell-panel: #fcfaf6;
+  --shell-sel: color-mix(in srgb, var(--accent) 14%, transparent);
+  --wave-paper: #faf7f2;
+  --wave-ink: #57504a;
+  --wave-ink-strong: #3b3733;
+  --wave-accent: #0e7490;
+  --prose-font: "JinKai Prose", "TsangerJinKai04 W04", "仓耳今楷04 W04",
+    "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --prose-strong: "JinKai Strong", "TsangerJinKai04 W05", "仓耳今楷04 W05",
+    "PingFang SC", sans-serif;
+  --font: "JinKai Prose", "TsangerJinKai04 W04", "仓耳今楷04 W04",
+    "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+[data-theme="light"] {
+  --shell-line: rgba(87, 80, 74, 0.14);
+  --shell-sidebar: #f8f4ee;
+  --shell-paper: #faf7f2;
+  --shell-panel: #fcfaf6;
+  --bg: #faf7f2;
+  --sidebar-bg: #f8f4ee;
+  --panel-bg: #fcfaf6;
+}
+
+[data-theme="dark"] {
+  --shell-line: rgba(250, 247, 242, 0.12);
+  --shell-sidebar: #332e2a;
+  --shell-paper: #2a2623;
+  --shell-panel: #332e2a;
+  --bg: #2a2623;
+  --sidebar-bg: #332e2a;
+  --panel-bg: #332e2a;
+}
+
+html,
+body,
+#root {
+  background: var(--bg);
+  font-family: var(--font);
+  font-size: 15px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+/* Code/diff must not inherit the UI stack. A CJK display font (or a
+   failed "Cascadia Code" name) missing Latin c/i/o/r/s shows .notdef tofu. */
+pre,
+code,
+kbd,
+samp,
+.diff-view,
+.diff-text,
+.diff-gutter,
+.file-peek-text,
+.file-peek-editor,
+.file-peek-title {
+  font-family: var(--mono);
+  letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+
+.app {
+  background: var(--bg);
+}
+
+.sidebar {
+  background: var(--shell-sidebar);
+  border-right: 0;
+  box-shadow: inset -0.5px 0 0 var(--shell-line);
+}
+
+.brand {
+  border-bottom: 0;
+  box-shadow: inset 0 -0.5px 0 var(--shell-line);
+  background: transparent;
+}
+
+.brand h1 {
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.col-toggle {
+  border: 0;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.col-toggle:hover {
+  background: var(--shell-sel);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.main {
+  background: var(--shell-paper);
+}
+
+.topbar {
+  background: var(--shell-paper);
+  border-bottom: 0;
+  box-shadow: inset 0 -0.5px 0 var(--shell-line);
+  backdrop-filter: none;
+}
+
+.panel {
+  background: var(--shell-panel);
+  border-left: 0;
+  box-shadow: inset 0.5px 0 0 var(--shell-line);
+}
+
+.panel-header,
+.panel-tabs {
+  background: var(--shell-panel);
+  border-bottom: 0;
+  box-shadow: inset 0 -0.5px 0 var(--shell-line);
+  backdrop-filter: none;
+}
+
+.composer {
+  background: var(--shell-paper);
+  box-shadow: inset 0 0.5px 0 var(--shell-line);
+}
+
+.status-bar {
+  background: color-mix(in srgb, var(--shell-paper) 88%, var(--text) 4%);
+  box-shadow: inset 0 0.5px 0 var(--shell-line);
+}
+
+.recent-item {
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.sidebar .recent-item:hover {
+  background: var(--shell-sel);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.sidebar .recent-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent-2);
+}
+
+.sidebar .recent-item .path {
+  color: var(--text-muted);
+}
+
+.col-resize:hover::before,
+.col-resize:focus-visible::before,
+.app--resizing .col-resize::before {
+  background: var(--accent);
+}
+
+/* Welcome / auth — same paper as the living room */
+[data-theme="light"] .app.no-project,
+[data-theme="light"] .welcome {
+  background: linear-gradient(180deg, #fcfaf6 0%, #faf7f2 52%, #f8f4ee 100%);
+}
+
+[data-theme="light"] .welcome-card {
+  background: color-mix(in srgb, var(--shell-paper) 92%, white);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 0;
+  box-shadow:
+    inset 0 0 0 0.5px var(--shell-line),
+    0 8px 24px rgba(77, 55, 33, 0.08);
+  color: var(--wave-ink-strong);
+}
+
+[data-theme="light"] .welcome-card.is-loading {
+  border-color: transparent;
+}
+
+[data-theme="light"] .welcome-lead,
+[data-theme="light"] .welcome-meta {
+  color: var(--text-muted);
+}
+
+[data-theme="light"] .auth-card {
+  background: var(--bg-elevated);
+  border: 0;
+  box-shadow: inset 0 0 0 0.5px var(--shell-line);
+}
+
+[data-theme="light"] .auth-card.auth-ok {
+  background: color-mix(in srgb, var(--success) 10%, var(--shell-paper));
+  border-color: transparent;
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+[data-theme="light"] .loading-banner {
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 10%, var(--shell-paper));
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+[data-theme="light"] .welcome-actions .btn.primary,
+[data-theme="light"] .btn.primary {
+  background: var(--accent);
+  border: 0;
+  color: #fff;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+[data-theme="light"] .welcome-actions .btn.primary:hover,
+[data-theme="light"] .btn.primary:hover {
+  filter: brightness(1.06);
+}
+
+[data-theme="light"] .checklist {
+  color: var(--wave-ink);
+}
+
+[data-theme="light"] .msg {
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgba(20, 20, 40, 0.04),
+    0 0 0 0.5px rgba(60, 60, 67, 0.12);
+}
+
+[data-theme="light"] .msg.grok-prose,
+[data-theme="light"] .msg.user-prose,
+[data-theme="light"] .msg.system-note {
+  background: transparent;
+  box-shadow: none;
+}
+
+.msg.grok-prose,
+.msg.grok-prose .body,
+.msg.grok-prose .body.markdown,
+.msg.user-prose,
+.msg.user-prose .body,
+.msg.user-prose .user-bubble {
+  font-family: var(--prose-font);
+  font-size: 18px;
+  line-height: 1.7;
+}
+
+.msg.grok-prose,
+.msg.grok-prose .body,
+.msg.grok-prose .body.markdown {
+  color: var(--wave-ink-strong);
+}
+
+.msg.user-prose {
+  margin-top: 28px;
+}
+
+.timeline > .msg.user-prose:first-child,
+.day-divider + .msg.user-prose {
+  margin-top: 8px;
+}
+
+.msg.user-prose .user-bubble {
+  background: var(--user-bubble);
+  color: var(--user-bubble-fg);
+}
+
+.msg.user-prose .user-bubble .body,
+.msg.user-prose .user-bubble .cmd-args,
+.msg.user-prose .user-bubble .cmd-rest,
+.msg.user-prose .user-bubble .cmd-picked {
+  color: var(--user-bubble-fg);
+}
+
+.msg.grok-prose .body.markdown a {
+  color: var(--wave-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.msg.grok-prose .body.markdown strong,
+.msg.grok-prose .body.markdown b,
+.msg.grok-prose .body.markdown h1,
+.msg.grok-prose .body.markdown h2,
+.msg.grok-prose .body.markdown h3 {
+  font-family: var(--prose-strong);
+  font-weight: 400;
+  font-synthesis: none;
+  -webkit-text-stroke: 0;
+  paint-order: normal;
+  color: var(--wave-ink-strong);
+}
+
+.msg.grok-prose .body.markdown em {
+  color: var(--wave-ink);
+}
+
+.msg.grok-prose .body.markdown :not(pre) > code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--wave-ink-strong);
+  background: color-mix(in srgb, var(--wave-ink) 10%, var(--wave-paper));
+  border-radius: 6px;
+  padding: 0.12em 0.42em;
+}
+
+.msg.grok-prose .body.markdown pre {
+  font-family: var(--mono);
+  font-size: 14px;
+  background: #f3eee6;
+  border: 1px solid rgba(87, 80, 74, 0.14);
+  color: var(--wave-ink-strong);
+}
+
+.msg.grok-prose .body.markdown blockquote {
+  border-left: 3px solid var(--wave-ink-strong);
+  background: color-mix(in srgb, var(--wave-ink) 7%, var(--wave-paper));
+  color: var(--wave-ink-strong);
+}
+
+.msg.grok-prose .body.markdown ul {
+  list-style: disc;
+  padding-left: 1.45em;
+}
+
+.msg.grok-prose .body.markdown ol {
+  list-style: decimal;
+  padding-left: 1.45em;
+}
+
+.msg.grok-prose .body.markdown li {
+  color: var(--wave-ink-strong);
+}
+
+.msg.grok-prose .body.markdown li::marker {
+  color: var(--wave-ink-strong);
+}
+
+.msg.grok-prose .body.markdown li::before {
+  content: none;
+}
+
+.msg.grok-prose .body.markdown h4,
+.msg.grok-prose .body.markdown h5,
+.msg.grok-prose .body.markdown h6 {
+  color: var(--wave-ink-strong);
+}
+
+.inline-activity-toggle,
+.activity-cluster-toggle,
+.inline-activity-summary {
+  font-family: var(--prose-font);
+  font-size: 13px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--wave-ink) 42%, var(--wave-paper));
+  font-weight: 400;
+}
+
+.inline-activity-toggle:hover:not(:disabled) .inline-activity-summary,
+.activity-cluster-toggle:hover:not(:disabled) .inline-activity-summary {
+  color: var(--wave-ink);
+}
+
+/* GrokDay: who is doing what — thinking / running / done / fail. */
+.inline-activity.thought .inline-activity-toggle,
+.inline-activity.recap .inline-activity-toggle,
+.inline-activity.tool.is-running .inline-activity-toggle,
+.inline-activity.tool.is-fail .inline-activity-toggle,
+.activity-cluster.is-running .activity-cluster-toggle,
+.activity-cluster.is-fail:not(.is-running) .activity-cluster-toggle,
+.turn-waiting,
+.turn-worked {
+  border-left: 2px solid currentColor;
+  padding-left: 10px;
+}
+
+.inline-activity.thought .inline-activity-toggle,
+.inline-activity.recap .inline-activity-toggle,
+.turn-waiting {
+  color: var(--status-thinking);
+}
+
+.inline-activity.tool.is-running .inline-activity-toggle,
+.activity-cluster.is-running .activity-cluster-toggle {
+  color: var(--status-running);
+}
+
+.inline-activity.tool.is-fail .inline-activity-toggle,
+.activity-cluster.is-fail:not(.is-running) .activity-cluster-toggle {
+  color: var(--status-error);
+}
+
+.turn-worked {
+  color: var(--status-success);
+}
+
+.inline-activity.thought .inline-activity-toggle:hover:not(:disabled) .inline-activity-summary,
+.inline-activity.recap .inline-activity-toggle:hover:not(:disabled) .inline-activity-summary,
+.inline-activity.tool.is-running .inline-activity-toggle:hover:not(:disabled) .inline-activity-summary,
+.inline-activity.tool.is-fail .inline-activity-toggle:hover:not(:disabled) .inline-activity-summary,
+.activity-cluster.is-running .activity-cluster-toggle:hover:not(:disabled) .inline-activity-summary,
+.activity-cluster.is-fail:not(.is-running) .activity-cluster-toggle:hover:not(:disabled) .inline-activity-summary {
+  color: inherit;
+  filter: brightness(0.88);
+}
+
+.empty-state.empty-state-home {
+  max-width: 36rem;
+  padding: 8vh 24px 4vh;
+}
+
+.empty-state.empty-state-home h2 {
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  margin-bottom: 10px;
+}
+
+.empty-state.empty-state-home p {
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+/* Living room: empty center + floating composer */
+.main--empty .timeline {
+  justify-content: center;
+}
+
+.main--empty .composer {
+  border-top: 0;
+  max-width: 720px;
+  width: calc(100% - 48px);
+  margin: 0 auto 10vh;
+  padding-top: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.main--empty .topbar-title {
+  opacity: 0;
+}
+
+.topbar-living {
+  min-height: 52px;
+}
+
+.platform-darwin .topbar-living {
+  min-height: 72px;
+}
+
+.composer-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.composer-chips .perm-mode-topbar,
+.composer-chips .model-topbar {
+  margin: 0;
+}
+
+.composer-chips .perm-mode-select,
+.composer-chips .model-topbar-value {
+  font-size: 12px;
+  border-radius: 999px;
+  background: transparent;
+  border-color: var(--border-soft);
+  color: var(--text-muted);
+  max-width: 11rem;
+}
+
+.tool-card-action {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.status-bar {
+  display: none;
+}
+
+.composer-box {
+  border-color: var(--border);
+  background: var(--bg-elevated);
+  box-shadow: none;
+}
+
+.composer textarea {
+  font-family: var(--prose-font);
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--wave-ink);
+}
+
+.recent-item .name {
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--wave-ink-strong);
+}
+
+.recent-item .path {
+  font-family: var(--font);
+  font-size: 12px;
+}
+
+.topbar-title {
+  font-family: var(--font);
+  color: var(--wave-ink-strong);
+}
+
+.brand h1 {
+  font-family: var(--font);
+  color: var(--wave-ink-strong);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 8px 2px 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+}
+
+.context-meter:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.context-meter.is-action {
+  cursor: pointer;
+}
+
+.context-meter.is-action:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--wave-ink-strong);
+}
+
+.context-meter-ring {
+  display: block;
+  transform: rotate(-90deg);
+}
+
+.context-meter-ring .track,
+.context-meter-ring .fill {
+  fill: none;
+  stroke-width: 2;
+}
+
+.context-meter-ring .track {
+  stroke: var(--border);
+}
+
+.context-meter-ring .fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+}
+
+.context-meter.tone-warn {
+  color: var(--warn);
+}
+
+.context-meter.tone-warn .fill {
+  stroke: var(--warn);
+}
+
+.context-meter.tone-danger {
+  color: var(--danger);
+}
+
+.context-meter.tone-danger .fill {
+  stroke: var(--danger);
+}
+
+.turn-waiting,
+.turn-worked {
+  max-width: min(720px, 100%);
+  width: 100%;
+  align-self: center;
+  padding: 1px 0 1px 10px;
+  font-family: var(--prose-font);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.turn-waiting .inline-activity-summary,
+.turn-worked {
+  color: inherit;
+}
+
+.status-dot.busy {
+  animation: status-busy-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes status-busy-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

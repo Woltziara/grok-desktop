@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Grok Desktop — main</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f3f7;
+      --bg-elevated: #ffffff;
+      --bg-soft: #e8e8ef;
+      --border: #d4d4e0;
+      --border-soft: #e2e2ec;
+      --text: #14141c;
+      --text-muted: #5a5a6e;
+      --accent: #7c3aed;
+      --accent-2: #2563eb;
+      --success: #059669;
+      --user-bubble: #e8eef8;
+      --font: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background:
+        radial-gradient(ellipse 80% 50% at 70% -10%, rgba(167, 139, 250, 0.22), transparent 50%),
+        linear-gradient(180deg, #e4e8f4 0%, #d5dde8 100%);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 32px;
+    }
+    .window {
+      width: 1280px;
+      height: 780px;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid #c8c8d6;
+      box-shadow: 0 30px 80px rgba(40, 40, 70, 0.16), 0 0 0 1px rgba(255,255,255,0.7) inset;
+      display: grid;
+      grid-template-columns: 260px 1fr 300px;
+      background: var(--bg);
+    }
+    .sidebar {
+      border-right: 1px solid var(--border);
+      background: linear-gradient(180deg, #fafafc 0%, #f0f0f5 100%);
+      display: flex;
+      flex-direction: column;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .brand-mark { border-radius: 9px; box-shadow: 0 2px 8px rgba(20,20,40,0.12); }
+    .brand h1 { margin: 0; font-size: 15px; font-weight: 650; }
+    .brand p { margin: 3px 0 0; font-size: 11px; color: var(--text-muted); }
+    .sec { padding: 12px; }
+    .sec h2 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    .sec-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .sec-head h2 { margin: 0; }
+    .linkish {
+      font-size: 12px;
+      color: var(--accent);
+      border: none;
+      background: none;
+      padding: 0;
+    }
+    .account {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #fff;
+      border: 1px solid var(--border-soft);
+    }
+    .account .name { font-size: 13px; font-weight: 600; }
+    .account .meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+    .session {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(124, 58, 237, 0.1);
+      border: 1px solid rgba(124, 58, 237, 0.28);
+      margin-bottom: 6px;
+    }
+    .session .name { font-size: 13px; font-weight: 600; }
+    .session .meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .session.idle { background: transparent; border-color: transparent; }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      width: 100%;
+      text-align: left;
+      margin-bottom: 8px;
+    }
+    .btn.primary {
+      background: linear-gradient(180deg, #8b5cf6, #7c3aed);
+      border-color: #6d28d9;
+      color: white;
+      font-weight: 600;
+      text-align: center;
+    }
+    .btn.sm { width: auto; padding: 6px 12px; margin: 0; }
+    .recent { padding: 8px 10px; border-radius: 8px; margin-bottom: 4px; }
+    .recent .n { font-size: 13px; display: block; }
+    .recent .p { font-size: 11px; color: var(--text-muted); }
+    .recent.active {
+      background: rgba(124, 58, 237, 0.08);
+      border: 1px solid rgba(124, 58, 237, 0.2);
+    }
+    .footer {
+      margin-top: auto;
+      padding: 12px;
+      border-top: 1px solid var(--border-soft);
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+    .main { display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-soft);
+      min-height: 56px;
+      background: #fafafc;
+    }
+    .topbar-title { font-size: 15px; font-weight: 650; }
+    .cwd {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      margin-top: 2px;
+    }
+    .chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .chip {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(5, 150, 105, 0.3);
+      color: var(--success);
+      background: rgba(5, 150, 105, 0.08);
+    }
+    .chip.muted {
+      border-color: var(--border);
+      color: var(--text-muted);
+      background: #fff;
+    }
+    .topbar-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+    .field {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .field select {
+      appearance: none;
+      background: #fff;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 4px 22px 4px 8px;
+      font-size: 12px;
+    }
+    .topbar-btn {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--success);
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(5, 150, 105, 0.25);
+      background: #fff;
+    }
+    .status .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--success);
+    }
+    .timeline {
+      flex: 1;
+      overflow: hidden;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 92%;
+      border-radius: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--border-soft);
+      background: #fff;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--user-bubble);
+      border-color: #c5d0e4;
+    }
+    .msg.user-command {
+      border-color: rgba(124, 58, 237, 0.35);
+      background: linear-gradient(135deg, rgba(124, 58, 237, 0.1) 0%, var(--user-bubble) 55%);
+    }
+    .meta {
+      display: flex;
+      gap: 10px;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .meta-role { font-weight: 600; color: #6d28d9; }
+    .msg.user .meta-role { color: #1d4ed8; }
+    .body { font-size: 14px; line-height: 1.5; }
+    .cmd-invocation { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .cmd-badge {
+      font-size: 10px;
+      font-weight: 650;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(37, 99, 235, 0.35);
+      color: var(--accent-2);
+      background: rgba(37, 99, 235, 0.08);
+    }
+    .cmd-name {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--accent);
+      background: rgba(20, 20, 40, 0.06);
+      padding: 2px 8px;
+      border-radius: 6px;
+    }
+    .tool {
+      border: 1px solid #c5d4ea;
+      background: #f0f4fa;
+      border-radius: 12px;
+      padding: 10px 12px;
+      max-width: 92%;
+    }
+    .tool-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .tool-status { font-size: 11px; color: var(--success); font-weight: 500; }
+    .tool-input, .tool-output {
+      margin: 8px 0 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      white-space: pre-wrap;
+    }
+    .tool-input { color: var(--text-muted); background: #eef0f5; }
+    .tool-output { color: var(--text); background: #fff; }
+    .composer { border-top: 1px solid var(--border-soft); padding: 12px 16px 10px; background: #fafafc; }
+    .composer-box {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #fff;
+      padding: 12px 14px;
+      min-height: 64px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+    .composer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 16px 10px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: #fafafc;
+    }
+    .panel {
+      border-left: 1px solid var(--border);
+      background: #f7f7fb;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-soft);
+      min-height: 52px;
+      align-items: flex-end;
+      padding: 0 8px;
+      background: #fafafc;
+    }
+    .panel-tabs span {
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+    }
+    .panel-tabs span.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+      font-weight: 600;
+    }
+    .panel-body { padding: 12px; flex: 1; overflow: hidden; }
+    .path {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .file-row.dir { color: var(--text); font-weight: 650; }
+    .file-row.file { color: var(--text-muted); }
+    .tasks-dock {
+      border-top: 1px solid var(--border-soft);
+      padding: 10px 12px;
+      background: #fff;
+    }
+    .tasks-dock h3 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+    }
+    .task {
+      font-size: 12px;
+      padding: 8px;
+      border-radius: 8px;
+      background: #f3f3f7;
+      border: 1px solid var(--border-soft);
+    }
+    .task .t { font-weight: 600; }
+    .task .s { color: var(--success); font-size: 11px; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-mark" width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="7.5" fill="#0A0A0A"/>
+          <rect x="0.5" y="0.5" width="31" height="31" rx="7.25" stroke="#FFFFFF" stroke-opacity="0.14"/>
+          <circle cx="16" cy="16" r="10" stroke="#FFFFFF" stroke-opacity="0.22"/>
+          <path d="M16 6 A10 10 0 0 1 26 16" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="1.35" stroke-linecap="round"/>
+          <path d="M16 8.2 L17.35 13.65 L22.8 15 L17.35 16.35 L16 21.8 L14.65 16.35 L9.2 15 L14.65 13.65 Z" fill="#FFFFFF"/>
+          <circle cx="16" cy="15" r="1.55" fill="#0A0A0A"/>
+          <circle cx="16" cy="15" r="0.85" fill="#FFFFFF"/>
+          <circle cx="26" cy="16" r="1.15" fill="#FFFFFF"/>
+        </svg>
+        <div>
+          <h1>Grok Desktop</h1>
+          <p>xAI · Grok Build GUI</p>
+        </div>
+      </div>
+      <div class="sec">
+        <button class="btn primary">Open project…</button>
+      </div>
+      <div class="sec">
+        <h2>Account</h2>
+        <div class="account">
+          <div class="name">team@x.ai</div>
+          <div class="meta">14 skills · 3 MCP</div>
+          <button class="btn" style="text-align:center;margin:8px 0 0">Sign out</button>
+        </div>
+      </div>
+      <div class="sec" style="flex:1;min-height:0">
+        <div class="sec-head">
+          <h2>Chats</h2>
+          <button class="linkish">+ New</button>
+        </div>
+        <div class="session">
+          <div class="name">Browser login paste + SHELL</div>
+          <div class="meta">Active · just now</div>
+        </div>
+        <div class="session idle">
+          <div class="name">Ship v1.0.0 stable</div>
+          <div class="meta">Yesterday</div>
+        </div>
+        <div class="session idle">
+          <div class="name">Approvals dock</div>
+          <div class="meta">2 days ago</div>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Recent projects</h2>
+        <div class="recent active">
+          <span class="n">grok-desktop</span>
+          <span class="p">~/Development/grok-desktop</span>
+        </div>
+        <div class="recent">
+          <span class="n">api-service</span>
+          <span class="p">~/Development/api-service</span>
+        </div>
+      </div>
+      <div class="footer">
+        <div>Session a3f8c2…</div>
+        <div>App v1.0.1 · grok CLI</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <div class="topbar-title">grok-desktop</div>
+          <div class="cwd">~/Development/grok-desktop</div>
+          <div class="chips">
+            <span class="chip">Sandbox on</span>
+            <span class="chip muted">Project-scoped</span>
+            <span class="chip muted">Git Bash</span>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <label class="field">Perms
+            <select><option>Ask</option><option>Auto</option><option>Always</option></select>
+          </label>
+          <label class="field">Effort
+            <select><option>High</option><option>Medium</option><option>Low</option><option>X-High</option></select>
+          </label>
+          <button class="topbar-btn" type="button">Compress</button>
+          <button class="topbar-btn" type="button">Preview</button>
+          <div class="status"><span class="dot"></span> Connected</div>
+        </div>
+      </div>
+      <div class="timeline">
+        <div class="msg user user-command">
+          <div class="meta"><span class="meta-role">You · command</span><span>08:22</span></div>
+          <div class="cmd-invocation">
+            <span class="cmd-badge">skill</span>
+            <code class="cmd-name">/review</code>
+          </div>
+          <div>local — paste-code login + Windows SHELL=bash</div>
+        </div>
+        <div class="tool">
+          <div class="tool-header">
+            <span>run_terminal_command</span>
+            <span class="tool-status">completed</span>
+          </div>
+          <div class="tool-input">git status --short</div>
+          <div class="tool-output">M  electron/auth.mjs
+M  electron/grok-home.mjs
+A  test/auth.test.mjs</div>
+        </div>
+        <div class="msg">
+          <div class="meta"><span class="meta-role">Grok</span><span>08:22</span></div>
+          <div class="body">Sign-in now shows the URL and a paste field; the finish-code hits the CLI loopback callback. On Windows, <strong>SHELL</strong> is Git Bash so tool commands match the sandbox.</div>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="composer-box">Message Grok…  (type / for skills)</div>
+        <div class="composer-actions">
+          <button class="btn sm">Cancel</button>
+          <button class="btn primary sm">Send</button>
+        </div>
+      </div>
+      <div class="status-bar">
+        <span>38.2k in · 6.1k out · $0.09</span>
+        <span>⎇ master</span>
+      </div>
+    </main>
+
+    <aside class="panel">
+      <div class="panel-tabs">
+        <span>Approvals</span>
+        <span class="active">Files</span>
+      </div>
+      <div class="panel-body">
+        <div class="path">grok-desktop</div>
+        <div class="file-row file"><span>📄</span> AGENTS.md</div>
+        <div class="file-row file"><span>📄</span> README.md</div>
+        <div class="file-row dir"><span>📁</span> electron</div>
+        <div class="file-row dir"><span>📁</span> src</div>
+        <div class="file-row dir"><span>📁</span> docs</div>
+        <div class="file-row file"><span>📄</span> package.json</div>
+      </div>
+      <div class="tasks-dock">
+        <h3>Tasks</h3>
+        <div class="task">
+          <div class="t">Review complete</div>
+          <div class="s">done · 12s</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

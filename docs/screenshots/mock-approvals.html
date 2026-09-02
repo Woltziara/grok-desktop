@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Grok Desktop — approvals</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f3f7;
+      --bg-elevated: #ffffff;
+      --bg-soft: #e8e8ef;
+      --border: #d4d4e0;
+      --border-soft: #e2e2ec;
+      --text: #14141c;
+      --text-muted: #5a5a6e;
+      --accent: #7c3aed;
+      --success: #059669;
+      --warn: #d97706;
+      --font: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background:
+        radial-gradient(ellipse 70% 50% at 30% -10%, rgba(251, 191, 36, 0.18), transparent 50%),
+        linear-gradient(180deg, #e8e4f0 0%, #d8dee8 100%);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 32px;
+    }
+    .window {
+      width: 1100px;
+      height: 680px;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid #c8c8d6;
+      box-shadow: 0 30px 80px rgba(40, 40, 70, 0.16);
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      background: var(--bg);
+    }
+    .main { display: flex; flex-direction: column; min-width: 0; }
+    .topbar {
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--border-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      background: #fafafc;
+    }
+    .topbar-title { font-size: 15px; font-weight: 650; }
+    .cwd { font-size: 11px; color: var(--text-muted); font-family: var(--mono); margin-top: 2px; }
+    .topbar-right { display: flex; align-items: center; gap: 10px; }
+    .field {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .field select {
+      appearance: none;
+      background: #fff;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 4px 20px 4px 8px;
+      font-size: 12px;
+    }
+    .busy {
+      color: var(--warn);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(217, 119, 6, 0.3);
+      background: rgba(217, 119, 6, 0.08);
+    }
+    .busy .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--warn);
+    }
+    .timeline { flex: 1; padding: 20px 22px 12px; display: flex; flex-direction: column; gap: 12px; }
+    .msg {
+      max-width: 88%;
+      border-radius: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--border-soft);
+      background: #fff;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #e8eef8;
+      border-color: #c5d0e4;
+    }
+    .meta { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
+    .body { font-size: 14px; line-height: 1.5; }
+    .tool {
+      border: 1px solid #c5d4ea;
+      background: #f0f4fa;
+      border-radius: 12px;
+      padding: 12px;
+      max-width: 88%;
+    }
+    .tool-header { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; }
+    .tool-status { font-size: 11px; color: var(--warn); font-weight: 500; }
+    .tool-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+    .tool-input {
+      margin-top: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      white-space: pre-wrap;
+    }
+    .approvals-dock {
+      margin: 0 16px 12px;
+      border: 1px solid rgba(217, 119, 6, 0.4);
+      background: linear-gradient(180deg, rgba(251, 191, 36, 0.16), #fff8eb);
+      border-radius: 14px;
+      padding: 12px 14px;
+    }
+    .approvals-dock-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px 12px;
+      margin-bottom: 10px;
+    }
+    .approvals-dock-head strong { font-size: 14px; }
+    .approvals-dock-hint { font-size: 12px; color: var(--text-muted); flex: 1 1 200px; }
+    .approvals-dock-item {
+      border: 1px solid rgba(217, 119, 6, 0.25);
+      background: #fff;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .approvals-dock-title { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+    .approvals-dock-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 7px 12px;
+      font-size: 13px;
+    }
+    .btn.primary {
+      background: linear-gradient(180deg, #8b5cf6, #7c3aed);
+      border-color: #6d28d9;
+      color: white;
+      font-weight: 600;
+    }
+    .btn.danger {
+      background: rgba(220, 38, 38, 0.08);
+      border-color: rgba(220, 38, 38, 0.3);
+      color: #b91c1c;
+    }
+    .btn.sm { padding: 6px 10px; font-size: 12px; }
+    .panel {
+      border-left: 1px solid var(--border);
+      background: #f7f7fb;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-soft);
+      padding: 0 8px;
+      min-height: 52px;
+      align-items: flex-end;
+      background: #fafafc;
+    }
+    .panel-tabs span {
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+    }
+    .panel-tabs span.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+      font-weight: 600;
+    }
+    .panel-body { padding: 14px; }
+    .perm-card {
+      border: 1px solid rgba(217, 119, 6, 0.35);
+      background: rgba(251, 191, 36, 0.1);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .perm-card h3 { margin: 0 0 6px; font-size: 14px; }
+    .kind { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .input {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+    }
+    .hint { margin-top: 14px; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <div class="topbar-title">grok-desktop</div>
+          <div class="cwd">~/Development/grok-desktop</div>
+        </div>
+        <div class="topbar-right">
+          <label class="field">Perms
+            <select><option selected>Ask</option><option>Auto</option><option>Always</option></select>
+          </label>
+          <div class="busy"><span class="dot"></span> Waiting for approval…</div>
+        </div>
+      </div>
+      <div class="timeline">
+        <div class="msg user">
+          <div class="meta">You</div>
+          <div class="body">Finish the v1.0.1 login paste path and set SHELL to Git Bash on Windows.</div>
+        </div>
+        <div class="tool">
+          <div class="tool-header">
+            <span>search_replace</span>
+            <span class="tool-status">pending</span>
+          </div>
+          <div class="tool-subtitle">Edit electron/auth.mjs</div>
+          <div class="tool-input">path: electron/auth.mjs
++ submitLoginInput → GET 127.0.0.1 callback
++ parseLoginProgress (URL + paste)</div>
+        </div>
+      </div>
+      <div class="approvals-dock">
+        <div class="approvals-dock-head">
+          <strong>Approval required</strong>
+          <span class="approvals-dock-hint">
+            Auto mode still escalates some writes — the agent is blocked until you choose.
+          </span>
+        </div>
+        <div class="approvals-dock-item">
+          <div class="approvals-dock-title">search_replace · edit electron/auth.mjs</div>
+          <div class="approvals-dock-actions">
+            <button class="btn primary sm">Allow once</button>
+            <button class="btn sm">Allow always</button>
+            <button class="btn sm">Reject</button>
+            <button class="btn danger sm">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </main>
+    <aside class="panel">
+      <div class="panel-tabs">
+        <span class="active">Approvals (1)</span>
+        <span>Files</span>
+        <span>Tasks</span>
+      </div>
+      <div class="panel-body">
+        <div class="perm-card">
+          <h3>search_replace</h3>
+          <div class="kind">edit · tool_call</div>
+          <div class="input">electron/auth.mjs
++ loopback finish-code
++ paste field in AuthGate</div>
+          <div class="approvals-dock-actions">
+            <button class="btn primary sm">Allow once</button>
+            <button class="btn sm">Reject</button>
+          </div>
+        </div>
+        <p class="hint">Bottom <strong>Approvals</strong> dock stays visible while tools run. Topbar <strong>Perms</strong> = Ask / Auto / Always.</p>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>
