@@ -985,6 +985,79 @@ export function mapInnerCommandForDocker(inner, projectRoot) {
  * }} opts
  * @returns {SpawnPlan}
  */
+/**
+ * `open foo.command` / `open -a Terminal` from inside sandbox-exec shows up as
+ * app “Sandbox”. macOS then refuses: Terminal will not open documents for it.
+ * Those launches must run as a child of Grok Desktop, not of sandbox-exec.
+ *
+ * @param {string} file
+ * @param {string[]} [fileArgs]
+ */
+export function isHostTerminalOpen(file, fileArgs) {
+  const args = Array.isArray(fileArgs) ? fileArgs.map(String) : [];
+  if (isOpenBinary(file)) return openArgsWantTerminal(args);
+  const base = path.basename(String(file || "")).toLowerCase();
+  if (
+    (base === "bash" ||
+      base === "bash.exe" ||
+      base === "sh" ||
+      base === "sh.exe" ||
+      base === "zsh") &&
+    args.length >= 2 &&
+    (args[0] === "-lc" || args[0] === "-c" || args[0] === "-lic")
+  ) {
+    return isSimpleTerminalOpenScript(args[1]);
+  }
+  return false;
+}
+
+function isOpenBinary(file) {
+  const s = String(file || "");
+  if (!s) return false;
+  if (s === "open" || s === "/usr/bin/open" || s === "/bin/open") return true;
+  return path.basename(s) === "open";
+}
+
+function isTerminalAppName(name) {
+  return /^(Terminal|iTerm2?)$/i.test(String(name || "").trim());
+}
+
+function isCommandDocument(p) {
+  return /\.(command|tool)$/i.test(String(p || "").trim());
+}
+
+function openArgsWantTerminal(args) {
+  if (args.some(isCommandDocument)) return true;
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-a" && isTerminalAppName(args[i + 1])) return true;
+  }
+  return false;
+}
+
+/**
+ * A one-shot `open …command` shell line — no pipes, no extra commands.
+ * @param {string} body
+ */
+export function isSimpleTerminalOpenScript(body) {
+  const t = String(body || "").trim();
+  if (!t) return false;
+  if (/[;&|`${]/.test(t)) return false;
+  const m = t.match(
+    /^(?:\/usr\/bin\/)?open(?:\s+-a\s+(?:Terminal|iTerm2?))?(?:\s+-n)?(?:\s+--)?(?:\s+(.+))?$/i,
+  );
+  if (!m) return false;
+  const rest = (m[1] || "").trim();
+  if (!rest) return Boolean(/\s+-a\s+(?:Terminal|iTerm2?)/i.test(t));
+  let doc = rest;
+  if (
+    (doc.startsWith('"') && doc.endsWith('"')) ||
+    (doc.startsWith("'") && doc.endsWith("'"))
+  ) {
+    doc = doc.slice(1, -1);
+  }
+  return isCommandDocument(doc);
+}
+
 export function planSandboxedSpawn(opts) {
   const projectRoot = realpathOrSelf(opts.projectRoot);
   const cwd = realpathOrSelf(opts.cwd || projectRoot);
@@ -1006,6 +1079,21 @@ export function planSandboxedSpawn(opts) {
     fileArgs: opts.fileArgs,
     shell: Boolean(opts.shell),
   });
+
+  // Terminal.app rejects Apple Events from sandbox-exec (“Sandbox”).
+  if (
+    isHostTerminalOpen(opts.file, opts.fileArgs) ||
+    isHostTerminalOpen(inner.file, inner.fileArgs)
+  ) {
+    return {
+      file: inner.file,
+      fileArgs: inner.fileArgs,
+      shell: false,
+      cwd,
+      env,
+      backend: "host-open",
+    };
+  }
 
   if (probe.backend === "sandbox-exec") {
     const profile = buildSeatbeltProfile({ projectRoot });

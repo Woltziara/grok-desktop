@@ -33,6 +33,14 @@ export function useProjectSession(opts: {
   clearSessionScoped: () => void;
   revokeWritesThisSession: () => void | Promise<void>;
   hydrateBackgroundTasks: (tasks: import("../lib/background-tasks").BackgroundTask[]) => void;
+  hydrateScheduledTasks?: (
+    tasks: Array<{
+      id: string;
+      prompt: string;
+      schedule: string;
+      nextFireAt?: string | null;
+    }>,
+  ) => void;
   hydrateSessionUsage: (usage: import("../lib/usage").SessionUsage | null | undefined) => void;
   /** Mirror open permission gates from main (source of truth). */
   syncPermissionsFromMain: () => void | Promise<void>;
@@ -56,6 +64,18 @@ export function useProjectSession(opts: {
   setItems: Dispatch<SetStateAction<TimelineItem[]>>;
   setAgentCommands: Dispatch<SetStateAction<SlashCommand[]>>;
   clearPromptQueue: () => void;
+  beginOpening: (sessionId?: string | null) => number;
+  bindOpeningSession: (
+    sessionId?: string | null,
+    afterSeq?: number | null,
+  ) => void;
+  abortOpening: (gen?: number) => void;
+  finishOpening: (gen?: number) => void;
+  applyOpenTimeline: (
+    banner: TimelineItem,
+    history: TimelineItem[],
+    gen?: number,
+  ) => TimelineItem[];
   /** Leave the project and return to AuthGate install when grok is missing. */
   onMissingBinary?: () => void | Promise<void>;
   /** Same checkout already open in another window — prompt for a worktree. */
@@ -71,6 +91,7 @@ export function useProjectSession(opts: {
     clearSessionScoped,
     revokeWritesThisSession,
     hydrateBackgroundTasks,
+    hydrateScheduledTasks,
     hydrateSessionUsage,
     syncPermissionsFromMain,
     hydrateFromInfo,
@@ -94,6 +115,11 @@ export function useProjectSession(opts: {
     clearPromptQueue,
     onMissingBinary,
     onCheckoutConflict,
+    beginOpening,
+    bindOpeningSession,
+    abortOpening,
+    finishOpening,
+    applyOpenTimeline,
   } = opts;
 
   const applyOpenResult = useCallback(
@@ -101,10 +127,17 @@ export function useProjectSession(opts: {
       res: OpenProjectResult & {
         warning?: string | null;
         backgroundTasks?: import("../lib/background-tasks").BackgroundTask[];
+        scheduledTasks?: Array<{
+          id: string;
+          prompt: string;
+          schedule: string;
+          nextFireAt?: string | null;
+        }>;
         usage?: import("../lib/usage").SessionUsage | null;
       },
-      openOpts?: { note?: string },
+      openOpts?: { note?: string; openGen?: number },
     ) => {
+      bindOpeningSession(res.sessionId, res.historySeq);
       setProject(res.cwd);
       setSessionId(res.sessionId);
       setSessions(res.sessions || []);
@@ -115,6 +148,7 @@ export function useProjectSession(opts: {
       await revokeWritesThisSession();
       // While openingRef is true, live usage is ignored — disk replace is safe.
       hydrateBackgroundTasks(res.backgroundTasks || []);
+      hydrateScheduledTasks?.(res.scheduledTasks || []);
       hydrateSessionUsage(res.usage);
       // Await so we do not mark online with a stale empty mirror.
       await syncPermissionsFromMain();
@@ -163,7 +197,7 @@ export function useProjectSession(opts: {
           .join("\n"),
         at: Date.now(),
       };
-      setItems([banner, ...history]);
+      applyOpenTimeline(banner, history, openOpts?.openGen);
       if (res.turnOpen) {
         busyRef.current = true;
         setConn("busy");
@@ -185,6 +219,7 @@ export function useProjectSession(opts: {
       clearSessionScoped,
       revokeWritesThisSession,
       hydrateBackgroundTasks,
+      hydrateScheduledTasks,
       hydrateSessionUsage,
       syncPermissionsFromMain,
       hydrateFromInfo,
@@ -207,6 +242,8 @@ export function useProjectSession(opts: {
       setModelId,
       setModelName,
       setAvailableModels,
+      bindOpeningSession,
+      applyOpenTimeline,
     ],
   );
 
@@ -227,6 +264,7 @@ export function useProjectSession(opts: {
       if (openingRef.current) return;
 
       openingRef.current = true;
+      const openGen = beginOpening(openOpts?.sessionId || null);
       const prevConn = project ? "online" : "idle";
       setConn("connecting");
       setOpeningLabel(basen(cwd));
@@ -240,12 +278,13 @@ export function useProjectSession(opts: {
         if (isCheckoutConflict(res)) {
           setOpeningLabel(null);
           setConn(prevConn);
+          abortOpening(openGen);
           onCheckoutConflict?.(res, cwd);
           return;
         }
         setItems([]);
         clearSessionScoped();
-        await applyOpenResult(res);
+        await applyOpenResult(res, { openGen });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         setOpeningLabel(null);
@@ -260,13 +299,18 @@ export function useProjectSession(opts: {
             void refreshAuth();
           }
         }
+        abortOpening(openGen);
       } finally {
+        finishOpening(openGen);
         openingRef.current = false;
       }
     },
     [
       auth,
       applyOpenResult,
+      beginOpening,
+      abortOpening,
+      finishOpening,
       clearSessionScoped,
       onCheckoutConflict,
       onMissingBinary,
@@ -292,6 +336,7 @@ export function useProjectSession(opts: {
       // Switching chats parks the live agent — do not cancel the in-flight turn.
 
       openingRef.current = true;
+      const openGen = beginOpening(sessionOpts.sessionId || null);
       setConn("connecting");
       setOpeningLabel(sessionOpts.mode === "new" ? "New chat" : "Resuming…");
       setError(null);
@@ -304,6 +349,7 @@ export function useProjectSession(opts: {
           mode: sessionOpts.mode || "resume",
         });
         await applyOpenResult(res, {
+          openGen,
           note:
             sessionOpts.mode === "new"
               ? "Started a new chat (CLI /new)"
@@ -320,13 +366,18 @@ export function useProjectSession(opts: {
           setConn("error");
           setError(msg);
         }
+        abortOpening(openGen);
       } finally {
+        finishOpening(openGen);
         openingRef.current = false;
       }
     },
     [
       auth,
       applyOpenResult,
+      beginOpening,
+      abortOpening,
+      finishOpening,
       busyRef,
       clearSessionScoped,
       onMissingBinary,
@@ -353,6 +404,7 @@ export function useProjectSession(opts: {
     if (openingRef.current) return;
 
     openingRef.current = true;
+    const openGen = beginOpening(null);
     busyRef.current = false;
     clearPromptQueue();
     setConn("connecting");
@@ -361,6 +413,7 @@ export function useProjectSession(opts: {
     try {
       const res = await window.grokDesktop.restartAgent();
       await applyOpenResult(res, {
+        openGen,
         note: res.resumed
           ? "Restarted Grok agent (same session)"
           : "Restarted Grok agent (new session)",
@@ -379,12 +432,17 @@ export function useProjectSession(opts: {
           void refreshAuth();
         }
       }
+      abortOpening(openGen);
     } finally {
+      finishOpening(openGen);
       openingRef.current = false;
     }
   }, [
     auth,
     applyOpenResult,
+    beginOpening,
+    abortOpening,
+    finishOpening,
     busyRef,
     clearPromptQueue,
     onMissingBinary,

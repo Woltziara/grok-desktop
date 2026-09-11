@@ -284,7 +284,7 @@ export function applySessionUpdate(items, params) {
       if (tip?.kind === "assistant") {
         next[next.length - 1] = {
           ...tip,
-          text: tip.text + text,
+          text: (tip.text || "") + text,
         };
       } else {
         next.push({
@@ -302,11 +302,12 @@ export function applySessionUpdate(items, params) {
       if (last?.kind === "user" && last.optimistic) {
         next[next.length - 1] = { ...last, optimistic: false };
       }
+      if (!text) return next;
       const tip = next[next.length - 1];
       if (tip?.kind === "thought") {
         next[next.length - 1] = {
           ...tip,
-          text: tip.text + text,
+          text: (tip.text || "") + text,
         };
       } else {
         next.push({

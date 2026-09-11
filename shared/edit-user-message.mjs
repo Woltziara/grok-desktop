@@ -40,6 +40,14 @@ export function cutIndexBeforeUserId(items, itemId) {
   return at < 0 ? list.length : at;
 }
 
+/** Keep this user bubble and drop everything after it (TUI /rewind). */
+export function cutIndexAfterUserId(items, itemId) {
+  const id = String(itemId || "");
+  const list = Array.isArray(items) ? items : [];
+  const at = list.findIndex((item) => item && item.id === id);
+  return at < 0 ? list.length : at + 1;
+}
+
 /** Last user-prompt index at or before this item (assistant branch point). */
 export function userPromptIndexAtOrBefore(items, itemId) {
   const id = String(itemId || "");

@@ -10,7 +10,7 @@ function joinProjectPath(root: string, rel: string): string {
   return `${r}${sep}${p.replace(/\//g, sep)}`;
 }
 
-export type ArtifactKind = "html" | "image" | "markdown" | "text" | "other";
+export type ArtifactKind = "html" | "image" | "markdown" | "pdf" | "text" | "other";
 
 export type SessionArtifact = {
   absPath: string;
@@ -39,6 +39,7 @@ export function artifactKindFromPath(filePath: string): ArtifactKind {
   if (ext === ".html" || ext === ".htm") return "html";
   if (IMAGE_EXT.has(ext)) return "image";
   if (ext === ".md" || ext === ".markdown") return "markdown";
+  if (ext === ".pdf") return "pdf";
   if (
     ext === ".txt" ||
     ext === ".json" ||
@@ -55,7 +56,7 @@ export function artifactKindFromPath(filePath: string): ArtifactKind {
 }
 
 export function isTryableArtifact(kind: ArtifactKind): boolean {
-  return kind === "html" || kind === "image" || kind === "markdown";
+  return kind === "html" || kind === "image" || kind === "markdown" || kind === "pdf";
 }
 
 function displayRel(project: string, absPath: string): string {

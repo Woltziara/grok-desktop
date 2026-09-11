@@ -15,6 +15,8 @@ export const ChatTopbar = memo(function ChatTopbar({
   onStop,
   panelCollapsed,
   onTogglePanel,
+  onBack,
+  reconnecting = false,
 }: {
   project: string;
   workspaceLabel?: string;
@@ -26,6 +28,8 @@ export const ChatTopbar = memo(function ChatTopbar({
   onStop: () => void;
   panelCollapsed?: boolean;
   onTogglePanel?: () => void;
+  onBack?: () => void;
+  reconnecting?: boolean;
 }) {
   const runningTasks = backgroundTasks.filter((t) => t.status === "running");
   const connDot =
@@ -41,27 +45,43 @@ export const ChatTopbar = memo(function ChatTopbar({
     <div className="topbar topbar-living">
       <div className="topbar-main">
         <div className="topbar-project">
+          {onBack ? (
+            <button
+              type="button"
+              className="btn ghost btn-sm topbar-btn"
+              title="回到上一条对话"
+              onClick={onBack}
+            >
+              上一条
+            </button>
+          ) : null}
           <div className="topbar-title">{workspaceLabel || basen(project)}</div>
+          {reconnecting ? (
+            <span className="topbar-reconnect">正在恢复连接…</span>
+          ) : null}
         </div>
         <div className="topbar-actions row">
-          {runningTasks.length > 0 ? (
-            <span
-              className="status-dot-only"
-              title={`Tasks ${runningTasks.length}`}
-              aria-label={`Tasks ${runningTasks.length}`}
-            >
-              <span className="status-dot busy" />
-            </span>
-          ) : null}
           <span
             className={`status-dot-only ${isOpening ? "status-pill-loading" : ""}`}
-            title={statusLabel}
-            aria-label={statusLabel}
+            title={
+              runningTasks.length > 0
+                ? conn === "busy"
+                  ? `正在回复，还有 ${runningTasks.length} 个后台任务`
+                  : `还有 ${runningTasks.length} 个后台任务`
+                : statusLabel
+            }
+            aria-label={
+              runningTasks.length > 0
+                ? `后台任务 ${runningTasks.length}`
+                : statusLabel
+            }
           >
             {isOpening ? (
               <Spinner size={12} className="spinner status-spinner" />
             ) : (
-              <span className={`status-dot ${connDot}`} />
+              <span
+                className={`status-dot ${conn === "busy" || runningTasks.length > 0 ? "busy" : connDot}`}
+              />
             )}
           </span>
           {onOpenPreview ? (

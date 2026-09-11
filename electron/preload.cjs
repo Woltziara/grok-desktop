@@ -70,6 +70,20 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   getCodingDataStatus: () => ipcRenderer.invoke("app:get-coding-data"),
   setCodingDataOptIn: (value) =>
     ipcRenderer.invoke("app:set-coding-data-opt-in", value),
+  getMemoryStatus: () => ipcRenderer.invoke("memory:status"),
+  setMemoryEnabled: (value) => ipcRenderer.invoke("memory:set-enabled", value),
+  deleteMemoryEntry: (entryId) => ipcRenderer.invoke("memory:delete", entryId),
+  getBilling: () => ipcRenderer.invoke("agent:billing"),
+  deleteScheduledTask: (opts) =>
+    ipcRenderer.invoke("agent:scheduler-delete", opts || {}),
+  exportChat: (opts) => ipcRenderer.invoke("chat:export", opts || {}),
+  peerStatus: () => ipcRenderer.invoke("peer:status"),
+  peerPair: (password) => ipcRenderer.invoke("peer:pair", password),
+  peerAlign: (opts) => ipcRenderer.invoke("peer:align", opts || {}),
+  listAccounts: () => ipcRenderer.invoke("account:list"),
+  activateAccount: (id) => ipcRenderer.invoke("account:activate", id),
+  copyAuthToPeer: (direction) =>
+    ipcRenderer.invoke("peer:copy-auth", direction || "push"),
   setAllowPrerelease: (value) =>
     ipcRenderer.invoke("app:set-allow-prerelease", value),
   setDebugLogging: (value) => ipcRenderer.invoke("app:set-debug-logging", value),
@@ -88,6 +102,9 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   showItem: (path) => ipcRenderer.invoke("shell:show-item", path),
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
   pickFile: () => ipcRenderer.invoke("fs:pick-file"),
+  pickFiles: () => ipcRenderer.invoke("fs:pick-files"),
+  importAttachment: (path) => ipcRenderer.invoke("attachments:import", path),
+  pingAgent: () => ipcRenderer.invoke("agent:ping"),
   artifactPreview: (path) => ipcRenderer.invoke("artifact:preview", path),
   openPreview: (url) =>
     ipcRenderer.invoke("preview:open", url ? { url } : {}),
@@ -122,6 +139,10 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   disablePlugin: (name) => ipcRenderer.invoke("plugin:disable", name),
   installPlugin: (source) => ipcRenderer.invoke("plugin:install", source),
   writeClipboard: (payload) => ipcRenderer.invoke("clipboard:write", payload || {}),
+  notify: (payload) => ipcRenderer.invoke("app:notify", payload || {}),
+  bundleStale: () => ipcRenderer.invoke("app:bundle-stale"),
+  relaunchApp: () => ipcRenderer.invoke("app:relaunch"),
+  openDefault: (path) => ipcRenderer.invoke("shell:open-default", path),
 
   on: (channel, handler) => {
     const valid = [
@@ -149,8 +170,12 @@ contextBridge.exposeInMainWorld("grokDesktop", {
       "app:open-checkouts",
       "app:new-worktree",
       "auth:login-progress",
+      "auth:changed",
       "preview:changed",
       "preview:viewport-capture",
+      "app:find",
+      "app:notify-click",
+      "agent:parked-update",
     ];
     if (!valid.includes(channel)) return () => {};
     const listener = (_event, payload) => handler(payload);

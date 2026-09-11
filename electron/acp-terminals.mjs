@@ -582,14 +582,25 @@ export class AcpTerminalManager extends EventEmitter {
   }
 
   disposeAll() {
+    this.killAllImmediate();
+  }
+
+  /** Stop every tool shell now (SIGKILL). Used by the Stop button. */
+  killAllImmediate() {
     for (const id of [...this.terminals.keys()]) {
+      const term = this.terminals.get(id);
+      if (!term) continue;
       try {
-        this.release({ terminalId: id });
+        this._killProcess(term, { immediate: true });
       } catch {
         /* ignore */
       }
+      if (!term.exited) {
+        this._markExited(term, term.exitCode, term.signal ?? "SIGKILL");
+      }
+      this.terminals.delete(id);
+      this.emit("released", { terminalId: term.id, sessionId: term.sessionId });
     }
-    this.terminals.clear();
   }
 
   /**
@@ -690,14 +701,14 @@ export class AcpTerminalManager extends EventEmitter {
 
     if (!pid) {
       try {
-        proc.kill("SIGTERM");
+        proc.kill(opts.immediate ? "SIGKILL" : "SIGTERM");
       } catch {
         /* ignore */
       }
       return;
     }
 
-    if (process.platform === "win32") {
+    if (opts.immediate || process.platform === "win32") {
       killPidTree(pid, "SIGKILL");
       return;
     }

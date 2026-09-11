@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TimelineItem } from "../../vite-env";
 import { collectSessionArtifacts } from "../../lib/session-artifacts.ts";
 import {
@@ -49,10 +49,13 @@ export const SideWorkbench = memo(function SideWorkbench({
     () => collectSessionArtifacts(items, project),
     [items, project],
   );
-  const artifactSig = artifacts.map((a) => a.absPath).join("\n");
+  const artifactSig = artifacts.map((a) => `${a.absPath}:${a.at}`).join("\n");
   const [tabs, setTabs] = useState<SideFileTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [previewHref, setPreviewHref] = useState<string | null>(null);
+  const [fileUpdated, setFileUpdated] = useState<string | null>(null);
+  const [previewEpoch, setPreviewEpoch] = useState(0);
+  const seenWriteRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     setTabs([]);
@@ -84,13 +87,21 @@ export const SideWorkbench = memo(function SideWorkbench({
       return changed ? next : prev;
     });
     if (lastTryable) setActiveId(lastTryable);
+    for (const art of artifacts) {
+      const prev = seenWriteRef.current[art.absPath];
+      if (prev && art.at > prev) setFileUpdated(art.absPath);
+      seenWriteRef.current[art.absPath] = art.at;
+    }
   }, [artifactSig]);
 
   const active = tabs.find((t) => t.id === activeId) ?? tabs[tabs.length - 1] ?? null;
   const activeKind = active ? artifactKindFromPath(active.absPath) : null;
 
   useEffect(() => {
-    if (!active || (activeKind !== "html" && activeKind !== "image")) {
+    if (
+      !active ||
+      (activeKind !== "html" && activeKind !== "image" && activeKind !== "pdf")
+    ) {
       setPreviewHref(null);
       return;
     }
@@ -170,6 +181,32 @@ export const SideWorkbench = memo(function SideWorkbench({
   );
 
   useEffect(() => {
+    const onOpen = (event: Event) => {
+      const absPath = String(
+        (event as CustomEvent<{ absPath?: string }>).detail?.absPath || "",
+      ).trim();
+      if (!absPath || !project) return;
+      onExpand();
+      const rel = absPath.replace(/\\/g, "/").startsWith(project.replace(/\\/g, "/") + "/")
+        ? absPath.replace(/\\/g, "/").slice(project.replace(/\\/g, "/").length + 1)
+        : absPath.replace(/\\/g, "/").split("/").pop() || absPath;
+      openPicked({
+        id: nextTabId(),
+        kind: "file",
+        absPath:
+          absPath.startsWith("/") || /^[A-Za-z]:/.test(absPath)
+            ? absPath
+            : `${project.replace(/[/\\]+$/, "")}/${absPath.replace(/^[/\\]+/, "")}`,
+        relPath: rel,
+        name: rel.split("/").pop() || rel,
+      });
+    };
+    window.addEventListener("grok-open-artifact", onOpen as EventListener);
+    return () =>
+      window.removeEventListener("grok-open-artifact", onOpen as EventListener);
+  }, [onExpand, openPicked, project]);
+
+  useEffect(() => {
     if (!browserOpen) return;
     const url = String(browserOpen.url || "").trim();
     setTabs((prev) => {
@@ -240,7 +277,23 @@ export const SideWorkbench = memo(function SideWorkbench({
         }
       />
       <div className="sw-body">
+        {fileUpdated && active && fileUpdated === active.absPath ? (
+          <div className="file-updated-banner">
+            这份文件有更新
+            <button
+              type="button"
+              className="btn ghost btn-sm"
+              onClick={() => {
+                setFileUpdated(null);
+                setPreviewEpoch((n) => n + 1);
+              }}
+            >
+              刷新
+            </button>
+          </div>
+        ) : null}
         <PreviewBody
+          key={`${active?.id || "none"}:${previewEpoch}`}
           tab={active}
           project={project}
           onSidePrompt={onSidePrompt}

@@ -37,10 +37,14 @@ import {
   normalizeReasoningEffort,
 } from "./reasoning-effort.mjs";
 import { cancelledPermissionResult } from "../shared/permission-options.mjs";
+import { rejectPendingByMethod } from "../shared/cancel-pending.mjs";
+import { interpretAcpPing } from "../shared/agent-ping.mjs";
 import { compressPromptImage } from "./image-compress.mjs";
 import {
   classifyInboundMessage,
   compactConversationAttempts,
+  billingAttempts,
+  schedulerDeleteAttempts,
   rewindExecuteAttempts,
   sessionForkAttempts,
   parseForkSessionId,
@@ -76,6 +80,10 @@ import {
 } from "./acp-ext-methods.mjs";
 import { shouldAutoTrustFolder } from "./desktop-worktrees.mjs";
 import { debugLog } from "./debug-log.mjs";
+import {
+  scheduledInjectFromInbound,
+  scheduledTaskUpdateFromInbound,
+} from "../shared/scheduled-tasks.mjs";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const INIT_TIMEOUT_MS = 60_000;
@@ -218,6 +226,8 @@ export class GrokAcpClient extends EventEmitter {
     this.nextId = 1;
     /** @type {Map<number, { resolve: Function, reject: Function, timer?: NodeJS.Timeout }>} */
     this.pending = new Map();
+    /** @type {string[]} */
+    this._cronQueue = [];
     /**
      * Open agent→client permission oneshots (ACP request id → gate).
      * Cancel MUST settle each with outcome cancelled (spec).
@@ -227,6 +237,8 @@ export class GrokAcpClient extends EventEmitter {
     /** @type {ReturnType<typeof createOnceResponder> | null} */
     this._once = null;
     this.sessionId = null;
+    /** Monotonic id for session/update events this process has emitted. */
+    this.updateSeq = 0;
     this.ready = false;
     this.stderrBuf = "";
     /** @type {Record<string, any>} */
@@ -249,6 +261,8 @@ export class GrokAcpClient extends EventEmitter {
     this.allowWritesThisSession = false;
     /** True while session/prompt is in flight. */
     this.turnOpen = false;
+    /** Stop was hit for the in-flight prompt — do not drain cron after it. */
+    this._turnCancelled = false;
     this.terminals = new AcpTerminalManager({
       defaultCwd: this.cwd,
       allowOutsideProject: this.allowOutsideProject,
@@ -656,7 +670,7 @@ export class GrokAcpClient extends EventEmitter {
 
     if (c.kind === "session-update") {
       // Progress only — does not complete tools; agent still needs client RPCs.
-      this.emit("session-update", c.params);
+      this.emit("session-update", this._stampOutboundUpdate(c.params));
       if (c.expectsEmptyAck) {
         this._ensureOnce().beginRequest(c.id);
         this._respond(c.id, {});
@@ -689,6 +703,14 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     if (c.kind === "notification") {
+      const scheduled = scheduledTaskUpdateFromInbound(c.method, c.params);
+      if (scheduled) {
+        this.emit("session-update", this._stampOutboundUpdate(scheduled));
+      }
+      const inject = scheduledInjectFromInbound(c.method, c.params);
+      if (inject) {
+        this.emit("scheduled-inject", inject);
+      }
       this.emit("notification", { method: c.method, params: c.params });
       return;
     }
@@ -953,6 +975,22 @@ export class GrokAcpClient extends EventEmitter {
     }
   }
 
+  /**
+   * Stamp session ownership and a per-agent seq so history replay can drop
+   * events already covered by the disk snapshot without comparing text.
+   * @param {any} params
+   */
+  _stampOutboundUpdate(params) {
+    this.updateSeq = (Number(this.updateSeq) || 0) + 1;
+    const base =
+      params && typeof params === "object" ? { ...params } : { update: params };
+    if (base.sessionId == null && base.session_id == null) {
+      base.sessionId = this.sessionId || null;
+    }
+    base._desktopSeq = this.updateSeq;
+    return base;
+  }
+
   _write(obj) {
     if (!this.proc?.stdin?.writable) throw new Error("Agent stdin not writable");
     this.proc.stdin.write(JSON.stringify(obj) + "\n");
@@ -976,7 +1014,7 @@ export class GrokAcpClient extends EventEmitter {
           ),
         );
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       try {
         this._write({ jsonrpc: "2.0", id, method, params });
       } catch (err) {
@@ -994,6 +1032,39 @@ export class GrokAcpClient extends EventEmitter {
       debugLog("acp", "notify-failed", {
         method,
         error: err?.message || String(err),
+      });
+    }
+  }
+
+  /**
+   * Round-trip health check. Process-alive is not sufficient: a hung
+   * agent still has a pid. Any JSON-RPC response (including method-not-found)
+   * proves the ACP pipe still answers; timeout means it does not.
+   * @param {number} [timeoutMs]
+   */
+  async ping(timeoutMs = 4000) {
+    const proc = this.proc;
+    const processAlive = Boolean(proc && !proc.killed && proc.exitCode == null);
+    const ready = Boolean(this.ready);
+    if (!processAlive || !ready) {
+      return interpretAcpPing({ processAlive, ready, rpcErrorMessage: null });
+    }
+    try {
+      await this.request(
+        "session/list",
+        this.sessionId ? { sessionId: this.sessionId } : {},
+        { timeoutMs },
+      );
+      return interpretAcpPing({
+        processAlive: true,
+        ready: true,
+        rpcErrorMessage: null,
+      });
+    } catch (err) {
+      return interpretAcpPing({
+        processAlive: true,
+        ready: true,
+        rpcErrorMessage: err?.message || String(err),
       });
     }
   }
@@ -1141,6 +1212,74 @@ export class GrokAcpClient extends EventEmitter {
     }
     throw new Error(
       `Rewind is not available on this Grok CLI connection (${misses.join(" · ") || "no methods accepted"}).`,
+    );
+  }
+
+  /**
+   * TUI `/usage` credits snapshot.
+   */
+  async fetchBilling() {
+    const methodMissing = (err) => {
+      if (err?.code === -32601) return true;
+      return /method not found|-32601|unknown method/i.test(
+        String(err?.message || err),
+      );
+    };
+    const misses = [];
+    for (const attempt of billingAttempts()) {
+      try {
+        const raw = await this.request(attempt.method, attempt.params, {
+          timeoutMs: 20_000,
+        });
+        return raw ?? {};
+      } catch (err) {
+        const message = err?.message || String(err);
+        if (methodMissing(err)) {
+          misses.push(`${attempt.method}: ${message}`);
+          continue;
+        }
+        throw err instanceof Error ? err : new Error(message);
+      }
+    }
+    throw new Error(
+      `Billing is not available on this Grok CLI connection (${misses.join(" · ") || "no methods accepted"}).`,
+    );
+  }
+
+  /**
+   * Cancel a scheduled `/loop` on this or a forked session id.
+   * @param {string} taskId
+   * @param {string} [sessionId]
+   */
+  async deleteScheduledTask(taskId, sessionId = "") {
+    const sid = String(sessionId || this.sessionId || "").trim();
+    if (!sid) throw new Error("No ACP session");
+    const id = String(taskId || "").trim();
+    if (!id) throw new Error("No scheduled task");
+    const methodMissing = (err) => {
+      if (err?.code === -32601) return true;
+      return /method not found|-32601|unknown method/i.test(
+        String(err?.message || err),
+      );
+    };
+    const misses = [];
+    for (const attempt of schedulerDeleteAttempts(sid, id)) {
+      try {
+        const raw = await this.request(attempt.method, attempt.params, {
+          timeoutMs: 20_000,
+        });
+        return raw ?? { ok: true, taskId: id };
+      } catch (err) {
+        const message = err?.message || String(err);
+        if (methodMissing(err)) {
+          misses.push(`${attempt.method}: ${message}`);
+          continue;
+        }
+        throw err instanceof Error ? err : new Error(message);
+      }
+    }
+    throw new Error(
+      `Stopping a timed task is not available on this Grok CLI connection (${misses.join(" · ") || "no methods accepted"}).`,
     );
   }
 
@@ -1438,6 +1577,7 @@ export class GrokAcpClient extends EventEmitter {
     }
     // Long agent turns — generous timeout
     this.turnOpen = true;
+    this._turnCancelled = false;
     try {
       return await this.request(
         "session/prompt",
@@ -1449,7 +1589,45 @@ export class GrokAcpClient extends EventEmitter {
       );
     } finally {
       this.turnOpen = false;
+      const cancelled = this._turnCancelled;
+      this._turnCancelled = false;
+      if (!cancelled) {
+        const next = this._cronQueue.shift();
+        if (next) {
+          void this.prompt(next).catch((err) => {
+            debugLog("acp", "scheduled-inject-failed", {
+              error: err?.message || String(err),
+            });
+          });
+        }
+      }
     }
+  }
+
+  /**
+   * ACP client must drive `/loop` fires (`x.ai/scheduled_task_inject_prompt`).
+   * @param {{ prompt: string }} inject
+   */
+  enqueueScheduledPrompt(inject) {
+    const text = String(inject?.prompt || "").trim();
+    if (!text) return;
+    if (this.turnOpen) {
+      this._cronQueue.push(text);
+      return;
+    }
+    void this.prompt(text).catch((err) => {
+      debugLog("acp", "scheduled-inject-failed", {
+        error: err?.message || String(err),
+      });
+    });
+  }
+
+  /**
+   * Drop in-flight session/prompt RPCs so Stop does not wait on the agent.
+   * @param {Error} err
+   */
+  _rejectPendingPrompts(err) {
+    rejectPendingByMethod(this.pending, "session/prompt", err);
   }
 
   cancel() {
@@ -1457,13 +1635,16 @@ export class GrokAcpClient extends EventEmitter {
     // Also settle extension gates via main (plan/ask) — caller should use
     // clearPendingPermissions. Kill tool shells so terminal/wait_for_exit
     // cannot park the turn after cancel.
+    this._turnCancelled = true;
     this._cancelOpenPermissionGates();
     this.turnOpen = false;
     try {
-      this.terminals.disposeAll();
+      this.terminals.killAllImmediate();
     } catch {
       /* ignore */
     }
+    const cancelled = new Error("cancelled");
+    this._rejectPendingPrompts(cancelled);
     // Do not clear once-responder here — in-flight fs may still need to answer.
     if (!this.sessionId) return;
     this.notify("session/cancel", { sessionId: this.sessionId });

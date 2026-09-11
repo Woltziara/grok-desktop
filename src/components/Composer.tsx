@@ -10,6 +10,11 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { composerEnterAction } from "../../shared/composer-ime.mjs";
+import {
+  attachAcceptAttr,
+  mergeComposerTextWithFiles,
+} from "../../shared/pending-attach.mjs";
 import {
   DESKTOP_COMMANDS,
   filterCommands,
@@ -20,17 +25,37 @@ import {
 } from "../lib/commands";
 import type { ConnState } from "../lib/conn";
 import {
+  attachKindLabel,
+  filesToPendingFiles,
+  formatBytes,
+  importedToPendingFile,
+  revokePendingFile,
+  type PendingFile,
+} from "../lib/pending-files";
+import {
+  blobToDataUrl,
+  dataUrlToPendingImage,
   encodePendingImages,
   filesToPendingImages,
   revokePendingImagePreview,
   type PendingImage,
 } from "../lib/pending-images";
 import {
+  getDraftBlob,
+  putDraftBlob,
+} from "../lib/draft-blobs";
+import {
   formatInlinedFilePrompt,
   parseSoloLocalPath,
 } from "../lib/local-file-prompt";
 import type { PermissionMode } from "../lib/permission-mode";
 import type { ReasoningEffort } from "../lib/reasoning-effort";
+import {
+  readDraft,
+  saveDraft,
+  type DraftFile,
+  type SessionDraft,
+} from "../lib/workspace-store";
 import type { AvailableModel } from "../vite-env";
 import { CommandMenu } from "./CommandMenu";
 import { ContextMeter } from "./ContextMeter";
@@ -97,6 +122,7 @@ export const Composer = memo(function Composer({
   commands,
   promptQueue,
   onSubmit,
+  onStop,
   onLocalCommand,
   onSendQueuedNow,
   onRemoveQueued,
@@ -114,6 +140,14 @@ export const Composer = memo(function Composer({
   usedContextTokens = 0,
   contextWindow = 0,
   onCompress,
+  sessionKey = null,
+  sessionCwd = "",
+  sessionId = null,
+  projectName = null,
+  reviveNonce = 0,
+  focusNonce = 0,
+  onQueueEdit,
+  onQueueMove,
 }: {
   conn: ConnState;
   projectOpen: boolean;
@@ -121,6 +155,7 @@ export const Composer = memo(function Composer({
   promptQueue: QueuedPrompt[];
   /** Return true when the draft should clear (accepted queue/delivery). */
   onSubmit: (payload: ComposerSubmit) => boolean | Promise<boolean>;
+  onStop?: () => void;
   /** Desktop-only slash (e.g. /new, /always-approve) — never reaches the agent. */
   onLocalCommand: (name: string, args?: string) => void;
   onSendQueuedNow: (id?: string) => void;
@@ -139,16 +174,47 @@ export const Composer = memo(function Composer({
   usedContextTokens?: number;
   contextWindow?: number;
   onCompress?: () => void;
+  sessionKey?: string | null;
+  sessionCwd?: string;
+  sessionId?: string | null;
+  projectName?: string | null;
+  reviveNonce?: number;
+  focusNonce?: number;
+  onQueueEdit?: (id: string, text: string) => void;
+  onQueueMove?: (id: string, dir: number) => void;
 }) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [highDetail, setHighDetail] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [queueDraft, setQueueDraft] = useState("");
+  const submittingRef = useRef(false);
+  const hydratedRef = useRef(false);
+  const persistFailRef = useRef("");
+  const imageDataUrlRef = useRef<Record<string, string>>({});
+  const snapshotRef = useRef<{
+    input: string;
+    images: PendingImage[];
+    files: PendingFile[];
+    highDetail: boolean;
+    cursor: number;
+  } | null>(null);
   const [cmdIndex, setCmdIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [composerHeight, setComposerHeight] = useState(readStoredComposerHeight);
   const [resizing, setResizing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const imagesRef = useRef(pendingImages);
+  imagesRef.current = pendingImages;
+  const filesRef = useRef(pendingFiles);
+  filesRef.current = pendingFiles;
+  const highDetailRef = useRef(highDetail);
+  highDetailRef.current = highDetail;
   const promptQueueRef = useRef(promptQueue);
   promptQueueRef.current = promptQueue;
   const heightRef = useRef(composerHeight);
@@ -246,18 +312,260 @@ export const Composer = memo(function Composer({
     persistComposerHeight(COMPOSER_HEIGHT_DEFAULT);
   }, []);
 
+  const persistCurrentDraft = useCallback(() => {
+    if (!hydratedRef.current) return;
+    if (!sessionCwd || !sessionId) return;
+    const files: DraftFile[] = [
+      ...imagesRef.current.map((img) => ({
+        id: img.id,
+        name: img.name || "图片",
+        mimeType: img.mimeType,
+        size: img.source?.size || 0,
+        kind: "image",
+        path: (img as PendingImage & { path?: string }).path,
+        blobId: img.id,
+        dataUrl: imageDataUrlRef.current[img.id] || undefined,
+      })),
+      ...filesRef.current.map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size,
+        kind: f.kind,
+        path: f.path,
+        status: f.status,
+        text: f.text,
+      })),
+    ];
+    const draft: SessionDraft = {
+      text: inputRef.current,
+      cursor: textareaRef.current?.selectionStart ?? inputRef.current.length,
+      highDetail: highDetailRef.current,
+      files,
+      savedAt: Date.now(),
+      cwd: sessionCwd,
+    };
+    const result = saveDraft(sessionCwd, sessionId, draft);
+    if (result && result.ok === false) {
+      const msg = `草稿没保存成功。${result.error || "这台电脑的存储空间可能不够。"}`;
+      if (persistFailRef.current !== msg) {
+        persistFailRef.current = msg;
+        onError(msg);
+      }
+    } else {
+      persistFailRef.current = "";
+    }
+  }, [sessionCwd, sessionId, onError]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => persistCurrentDraft(), 280);
+    return () => window.clearTimeout(t);
+  }, [input, pendingImages, pendingFiles, highDetail, persistCurrentDraft]);
+
+  useEffect(() => {
+    return () => persistCurrentDraft();
+  }, [persistCurrentDraft]);
+
+  useEffect(() => {
+    if (!sessionCwd || !sessionId) return;
+    let cancelled = false;
+    const draft = readDraft(sessionCwd, sessionId);
+    if (!draft) {
+      hydratedRef.current = true;
+      return;
+    }
+    void (async () => {
+      setInput(draft.text || "");
+      setHighDetail(Boolean(draft.highDetail));
+      const images: PendingImage[] = [];
+      const files: PendingFile[] = [];
+      let missingImage = false;
+      for (const f of draft.files || []) {
+        if (f.kind === "image") {
+          let blob: Blob | null = null;
+          try {
+            blob = await getDraftBlob(f.blobId || f.id);
+          } catch {
+            blob = null;
+          }
+          if (cancelled) return;
+          if (blob) {
+            images.push({
+              id: f.id,
+              data: "",
+              mimeType: f.mimeType || blob.type || "image/png",
+              previewUrl: URL.createObjectURL(blob),
+              name: f.name,
+              source: blob,
+            });
+            continue;
+          }
+          const restored = f.dataUrl
+            ? dataUrlToPendingImage(f.dataUrl, {
+                id: f.id,
+                name: f.name,
+                mimeType: f.mimeType,
+              })
+            : null;
+          if (restored) {
+            images.push(restored);
+            imageDataUrlRef.current[restored.id] = f.dataUrl || "";
+          } else if (f.previewUrl?.startsWith("data:")) {
+            images.push({
+              id: f.id,
+              data: "",
+              mimeType: f.mimeType || "image/png",
+              previewUrl: f.previewUrl,
+              name: f.name,
+            });
+          } else {
+            missingImage = true;
+          }
+        } else {
+          files.push({
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            size: f.size,
+            kind: (f.kind as PendingFile["kind"]) || "other",
+            status: f.status === "error" ? "error" : "ready",
+            path: f.path,
+            text: f.text,
+          });
+        }
+      }
+      if (cancelled) return;
+      setPendingImages(images);
+      setPendingFiles(files);
+      hydratedRef.current = true;
+      if (missingImage) {
+        onError("有附过的图片找不到完整内容了，需要重新附上。");
+      }
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        const cur = Math.min(draft.cursor || 0, el.value.length);
+        el.setSelectionRange(cur, cur);
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionCwd, sessionId, onError]);
+
+  useEffect(() => {
+    if (!reviveNonce) return;
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    setInput(snap.input);
+    setPendingImages(snap.images);
+    setPendingFiles(snap.files);
+    setHighDetail(snap.highDetail);
+    void (async () => {
+      for (const img of snap.images || []) {
+        if (img.source) {
+          try {
+            await putDraftBlob(img.id, img.source);
+          } catch {
+            /* quota — persist below still records the draft */
+          }
+        }
+      }
+      if (!sessionCwd || !sessionId) return;
+      const files: DraftFile[] = [
+        ...(snap.images || []).map((img) => ({
+          id: img.id,
+          name: img.name || "图片",
+          mimeType: img.mimeType,
+          size: img.source?.size || 0,
+          kind: "image",
+          blobId: img.id,
+        })),
+        ...(snap.files || []).map((f) => ({
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          size: f.size,
+          kind: f.kind,
+          path: f.path,
+          status: f.status,
+          text: f.text,
+        })),
+      ];
+      saveDraft(sessionCwd, sessionId, {
+        text: snap.input,
+        cursor: snap.cursor,
+        highDetail: snap.highDetail,
+        files,
+        savedAt: Date.now(),
+        cwd: sessionCwd,
+      });
+    })();
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const cur = Math.min(snap.cursor, el.value.length);
+      el.setSelectionRange(cur, cur);
+    });
+  }, [reviveNonce, sessionCwd, sessionId]);
+
+  useEffect(() => {
+    if (!focusNonce) return;
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [focusNonce]);
+
   const clearDraft = useCallback(() => {
     setPendingImages((prev) => {
       for (const img of prev) revokePendingImagePreview(img);
       return [];
     });
+    setPendingFiles((prev) => {
+      for (const file of prev) revokePendingFile(file);
+      return [];
+    });
     setInput("");
     setHighDetail(false);
-  }, []);
+    if (sessionCwd && sessionId) {
+      saveDraft(sessionCwd, sessionId, null);
+    }
+  }, [sessionCwd, sessionId]);
 
   const addImages = useCallback(
     async (files: ArrayLike<Blob | File>) => {
-      const { images, error } = await filesToPendingImages(files);
+      const { images, error, duplicates } = await filesToPendingImages(
+        files,
+        imagesRef.current,
+      );
+      if (duplicates.length) {
+        onError(`已经附过：${duplicates.join("、")}`);
+      }
+      for (const img of images) {
+        const src = img.source;
+        if (src) {
+          try {
+            await putDraftBlob(img.id, src);
+          } catch {
+            if (src.size < 1.5 * 1024 * 1024) {
+              try {
+                imageDataUrlRef.current[img.id] = await blobToDataUrl(src);
+              } catch {
+                onError(
+                  "这张图没能完整写入草稿。当前还能发送，但关掉窗口后可能丢失。",
+                );
+              }
+            } else {
+              onError(
+                "这张图比较大，草稿没能完整保存。当前还能发送，但关掉窗口后可能丢失。",
+              );
+            }
+          }
+        } else if (img.data) {
+          imageDataUrlRef.current[img.id] =
+            `data:${img.mimeType};base64,${img.data}`;
+        }
+      }
       if (images.length) {
         setPendingImages((prev) => [...prev, ...images]);
       }
@@ -265,6 +573,133 @@ export const Composer = memo(function Composer({
     },
     [onError],
   );
+
+  const importNativePaths = useCallback(
+    async (paths: string[]) => {
+      if (!paths.length) return;
+      const api = window.grokDesktop.importAttachment;
+      if (typeof api !== "function") {
+        onError("这个版本还不能从对话框附上 PDF，请更新后重试");
+        return;
+      }
+      for (const p of paths) {
+        try {
+          const row = await api(p);
+          if (row.kind === "image" && row.data) {
+            const img = dataUrlToPendingImage(
+              `data:${row.mimeType};base64,${row.data}`,
+              { name: row.name, mimeType: row.mimeType },
+            );
+            if (img) {
+              if (img.source) {
+                try {
+                  await putDraftBlob(img.id, img.source);
+                } catch {
+                  imageDataUrlRef.current[img.id] =
+                    `data:${row.mimeType};base64,${row.data}`;
+                }
+              } else {
+                imageDataUrlRef.current[img.id] =
+                  `data:${row.mimeType};base64,${row.data}`;
+              }
+              setPendingImages((prev) => {
+                const dup = prev.some(
+                  (x) => x.name === img.name && x.source?.size === img.source?.size,
+                );
+                if (dup) {
+                  onError(`已经附过：${img.name}`);
+                  return prev;
+                }
+                return [...prev, img];
+              });
+            }
+            continue;
+          }
+          const file = importedToPendingFile(row);
+          setPendingFiles((prev) => {
+            const dup = prev.some(
+              (x) => x.path && file.path && x.path === file.path,
+            );
+            if (dup) {
+              onError(`已经附过：${file.name}`);
+              return prev;
+            }
+            return [...prev, file];
+          });
+        } catch (e: unknown) {
+          onError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    },
+    [onError],
+  );
+
+  const retryPendingFile = useCallback(
+    async (file: PendingFile) => {
+      if (file.path) {
+        await importNativePaths([file.path]);
+        setPendingFiles((prev) => prev.filter((f) => f.id !== file.id));
+        return;
+      }
+      if (file.source instanceof File) {
+        const { files, error } = await filesToPendingFiles([file.source], []);
+        if (error) onError(error);
+        setPendingFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? files[0] || f : f)),
+        );
+      }
+    },
+    [importNativePaths, onError],
+  );
+
+  const addDroppedFiles = useCallback(
+    async (list: File[]) => {
+      const withPath = list.filter(
+        (f) => typeof (f as File & { path?: string }).path === "string" &&
+          (f as File & { path?: string }).path,
+      );
+      const nativePaths = withPath
+        .map((f) => String((f as File & { path?: string }).path || ""))
+        .filter(Boolean);
+      if (nativePaths.length) {
+        await importNativePaths(nativePaths);
+        const leftover = list.filter((f) => !nativePaths.includes(
+          String((f as File & { path?: string }).path || ""),
+        ));
+        if (!leftover.length) return;
+        list = leftover;
+      }
+      const images = list.filter((f) => f.type.startsWith("image/"));
+      const others = list.filter((f) => !f.type.startsWith("image/"));
+      if (images.length) await addImages(images);
+      if (!others.length) return;
+      const { files, error, duplicates } = await filesToPendingFiles(
+        others,
+        filesRef.current,
+      );
+      if (duplicates.length) {
+        onError(`已经附过：${duplicates.join("、")}`);
+      }
+      if (files.length) {
+        setPendingFiles((prev) => [...prev, ...files]);
+      }
+      if (error) onError(error);
+    },
+    [addImages, importNativePaths, onError],
+  );
+
+  useEffect(() => {
+    const onImport = (event: Event) => {
+      const paths = (event as CustomEvent<{ paths?: string[] }>).detail?.paths;
+      if (paths?.length) void importNativePaths(paths);
+    };
+    window.addEventListener("grok-import-attachments", onImport as EventListener);
+    return () =>
+      window.removeEventListener(
+        "grok-import-attachments",
+        onImport as EventListener,
+      );
+  }, [importNativePaths]);
 
   const removePendingImage = useCallback((id: string) => {
     setPendingImages((prev) => {
@@ -277,69 +712,98 @@ export const Composer = memo(function Composer({
     });
   }, []);
 
+  const removePendingFile = useCallback((id: string) => {
+    setPendingFiles((prev) => {
+      return prev.filter((file) => {
+        if (file.id === id) revokePendingFile(file);
+        return file.id !== id;
+      });
+    });
+  }, []);
+
   const submit = useCallback(
     async (overrideText?: string, mode: ComposerSubmit["mode"] = "auto") => {
+      if (submittingRef.current) return;
       let text = (overrideText !== undefined ? overrideText : input).trim();
       const draftImages = overrideText !== undefined ? [] : pendingImages;
+      const draftFiles = overrideText !== undefined ? [] : pendingFiles;
+      if (draftFiles.some((f) => f.status === "loading")) {
+        onError("附件还没准备好");
+        return;
+      }
+      if (!text) text = mergeComposerTextWithFiles("", draftFiles);
+      else text = mergeComposerTextWithFiles(text, draftFiles);
       if (!text && draftImages.length === 0) return;
       if (conn === "connecting" || !projectOpen) return;
-
-      const localPath = parseSoloLocalPath(text);
-      if (localPath) {
-        try {
-          const file = await window.grokDesktop.readFile(localPath);
-          if (file.binary) {
-            onError("That path is a binary file, not a text prompt.");
+      submittingRef.current = true;
+      snapshotRef.current = {
+        input,
+        images: pendingImages.map((img) => ({ ...img })),
+        files: pendingFiles.map((f) => ({ ...f })),
+        highDetail,
+        cursor: textareaRef.current?.selectionStart ?? input.length,
+      };
+      try {
+        const localPath = parseSoloLocalPath(text);
+        if (localPath) {
+          try {
+            const file = await window.grokDesktop.readFile(localPath);
+            if (file.binary) {
+              onError("That path is a binary file, not a text prompt.");
+              return;
+            }
+            if (!file.text.trim()) {
+              onError("That file is empty.");
+              return;
+            }
+            text = formatInlinedFilePrompt(localPath, file.text);
+          } catch (e: unknown) {
+            onError(e instanceof Error ? e.message : String(e));
             return;
           }
-          if (!file.text.trim()) {
-            onError("That file is empty.");
+        }
+
+        // Desktop-local slash commands (do not send to agent)
+        const localMatch = text.match(/^\/([^\s]+)(?:\s+(.*))?$/s);
+        if (localMatch) {
+          const name = localMatch[1].toLowerCase();
+          const local = DESKTOP_COMMANDS.find(
+            (c) => c.local && c.name.toLowerCase() === name,
+          );
+          if (local) {
+            clearDraft();
+            onLocalCommand(name, (localMatch[2] || "").trim());
             return;
           }
-          text = formatInlinedFilePrompt(localPath, file.text);
-        } catch (e: unknown) {
-          onError(e instanceof Error ? e.message : String(e));
-          return;
         }
-      }
 
-      // Desktop-local slash commands (do not send to agent)
-      const localMatch = text.match(/^\/([^\s]+)(?:\s+(.*))?$/s);
-      if (localMatch) {
-        const name = localMatch[1].toLowerCase();
-        const local = DESKTOP_COMMANDS.find(
-          (c) => c.local && c.name.toLowerCase() === name,
-        );
-        if (local) {
-          clearDraft();
-          onLocalCommand(name, (localMatch[2] || "").trim());
-          return;
+        const imageQuality = highDetail ? "high" : "compact";
+        let images = draftImages;
+        if (draftImages.length) {
+          try {
+            images = await encodePendingImages(draftImages, imageQuality);
+          } catch (e: unknown) {
+            onError(e instanceof Error ? e.message : String(e));
+            return;
+          }
         }
-      }
 
-      const imageQuality = highDetail ? "high" : "compact";
-      let images = draftImages;
-      if (draftImages.length) {
-        try {
-          images = await encodePendingImages(draftImages, imageQuality);
-        } catch (e: unknown) {
-          onError(e instanceof Error ? e.message : String(e));
-          return;
-        }
+        // Only wipe the draft after the parent accepts (queue / deliver / interject).
+        const accepted = await onSubmit({
+          text,
+          images: images.map((img) => ({ ...img })),
+          mode,
+          imageQuality,
+        });
+        if (accepted) clearDraft();
+      } finally {
+        submittingRef.current = false;
       }
-
-      // Only wipe the draft after the parent accepts (queue / deliver / interject).
-      const accepted = await onSubmit({
-        text,
-        images: images.map((img) => ({ ...img })),
-        mode,
-        imageQuality,
-      });
-      if (accepted) clearDraft();
     },
     [
       input,
       pendingImages,
+      pendingFiles,
       highDetail,
       conn,
       projectOpen,
@@ -406,22 +870,26 @@ export const Composer = memo(function Composer({
         return;
       }
     }
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    const enter = composerEnterAction(e);
+    if (enter === "ignore") return;
+    if (enter === "newline") return;
+    if (enter === "now") {
       e.preventDefault();
       void submit(undefined, "now");
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (enter === "submit") {
       e.preventDefault();
       if (
         !input.trim() &&
         pendingImages.length === 0 &&
+        pendingFiles.length === 0 &&
         promptQueueRef.current.length > 0
       ) {
         onSendQueuedNow();
         return;
       }
-      void submit(undefined, conn === "busy" ? "now" : "auto");
+      void submit(undefined, conn === "busy" ? "auto" : "auto");
     }
   };
 
@@ -450,14 +918,14 @@ export const Composer = memo(function Composer({
   const onDrop = async (e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const files = Array.from(e.dataTransfer?.files || []).filter((f) =>
-      f.type.startsWith("image/"),
-    );
-    if (files.length) await addImages(files);
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length) await addDroppedFiles(files);
   };
 
   const tall =
+    expanded ||
     composerHeight >= Math.min(composerHeightMax() * 0.45, 280);
+  const boxHeight = expanded ? composerHeightMax() : composerHeight;
 
   const modelOptions = useMemo(() => {
     const list = availableModels.slice();
@@ -515,6 +983,50 @@ export const Composer = memo(function Composer({
             onSelect={applySlashCommand}
           />
         )}
+        {pendingFiles.length > 0 && (
+          <div className="composer-files" aria-label="附件">
+            {pendingFiles.map((file) => (
+              <div
+                key={file.id}
+                className={
+                  "composer-file" +
+                  (file.status === "error" ? " is-error" : "") +
+                  (file.status === "loading" ? " is-loading" : "")
+                }
+              >
+                <div className="composer-file-meta">
+                  <span className="composer-file-name" title={file.path || file.name}>
+                    {file.name}
+                  </span>
+                  <span className="composer-file-kind">
+                    {attachKindLabel(file.kind)} · {formatBytes(file.size)}
+                    {file.status === "ready" ? " · 已准备好" : ""}
+                    {file.status === "loading" ? " · 正在读" : ""}
+                    {file.status === "error" ? ` · ${file.error || "失败"}` : ""}
+                  </span>
+                </div>
+                {file.status === "error" ? (
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm"
+                    title="重新选择或再读一次"
+                    onClick={() => void retryPendingFile(file)}
+                  >
+                    重试
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="composer-image-remove"
+                  title="去掉这个文件"
+                  onClick={() => removePendingFile(file.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {pendingImages.length > 0 && (
           <div className="composer-attach">
             <div className="composer-images">
@@ -552,35 +1064,78 @@ export const Composer = memo(function Composer({
         {promptQueue.length > 0 && (
           <div className="prompt-queue" aria-label="Queued follow-ups">
             <div className="prompt-queue-head">
-              <span>
-                Queue · {promptQueue.length} follow-up
-                {promptQueue.length === 1 ? "" : "s"}
-              </span>
+              <span>稍后接着做 · {promptQueue.length} 条</span>
               <span className="prompt-queue-hint">
-                runs after this turn · Enter on empty = send top now
+                回车加入稍后 · ⌘回车现在改方向
               </span>
             </div>
             <ul className="prompt-queue-list">
               {promptQueue.map((q, i) => (
                 <li key={q.id} className="prompt-queue-item">
                   <span className="prompt-queue-idx">{i + 1}</span>
-                  <span className="prompt-queue-text" title={q.text}>
-                    {q.text ||
-                      `(${q.images.length} image${q.images.length === 1 ? "" : "s"})`}
-                  </span>
+                  {editingQueueId === q.id ? (
+                    <input
+                      className="prompt-queue-edit"
+                      value={queueDraft}
+                      onChange={(e) => setQueueDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          onQueueEdit?.(q.id, queueDraft);
+                          setEditingQueueId(null);
+                        } else if (e.key === "Escape") {
+                          setEditingQueueId(null);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <span className="prompt-queue-text" title={q.text}>
+                      {q.text ||
+                        `(${q.images.length} 张图)`}
+                    </span>
+                  )}
                   <button
                     type="button"
                     className="btn ghost btn-sm"
-                    title="Send now (stops current turn)"
-                    disabled={conn === "connecting"}
-                    onClick={() => onSendQueuedNow(q.id)}
+                    title="上移"
+                    disabled={i === 0}
+                    onClick={() => onQueueMove?.(q.id, -1)}
                   >
-                    Now
+                    ↑
                   </button>
                   <button
                     type="button"
                     className="btn ghost btn-sm"
-                    title="Remove from queue"
+                    title="下移"
+                    disabled={i === promptQueue.length - 1}
+                    onClick={() => onQueueMove?.(q.id, 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm"
+                    title="修改这条稍后的话"
+                    onClick={() => {
+                      setEditingQueueId(q.id);
+                      setQueueDraft(q.text);
+                    }}
+                  >
+                    改
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm"
+                    title="现在改方向（停下当前回复）"
+                    disabled={conn === "connecting"}
+                    onClick={() => onSendQueuedNow(q.id)}
+                  >
+                    现在
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost btn-sm"
+                    title="去掉"
                     onClick={() => onRemoveQueued(q.id)}
                   >
                     ×
@@ -593,7 +1148,7 @@ export const Composer = memo(function Composer({
         <textarea
           ref={textareaRef}
           value={input}
-          style={{ height: composerHeight }}
+          style={{ height: boxHeight }}
           placeholder={
             conn === "busy"
               ? "正在想。要补充就接着打，回车会马上插入…"
@@ -609,23 +1164,44 @@ export const Composer = memo(function Composer({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={attachAcceptAttr()}
               multiple
               hidden
               onChange={(e) => {
                 const files = e.target.files;
-                if (files?.length) void addImages(files);
+                if (files?.length) void addDroppedFiles(Array.from(files));
                 e.target.value = "";
               }}
             />
+            {projectName ? (
+              <span className="composer-project" title={sessionCwd || projectName}>
+                {projectName}
+              </span>
+            ) : null}
             <button
               type="button"
               className="btn ghost btn-sm"
               disabled={conn === "connecting"}
-              onClick={() => fileInputRef.current?.click()}
-              title="附上图片"
+              onClick={() => {
+                if (typeof window.grokDesktop.pickFiles === "function") {
+                  void window.grokDesktop.pickFiles().then((paths) => {
+                    if (paths?.length) void importNativePaths(paths);
+                  });
+                  return;
+                }
+                fileInputRef.current?.click();
+              }}
+              title="附上图片、PDF、Word 或 Markdown"
             >
               +
+            </button>
+            <button
+              type="button"
+              className="btn ghost btn-sm"
+              title={expanded ? "收回输入框" : "把输入框展开来写"}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "收回" : "展开"}
             </button>
             {canPickModel ? (
               <label className="perm-mode-topbar" title="这一次用的模型">
@@ -692,20 +1268,30 @@ export const Composer = memo(function Composer({
               windowSize={contextWindow}
               onCompress={onCompress}
             />
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() =>
-                void submit(undefined, conn === "busy" ? "now" : "auto")
-              }
-              disabled={
-                (!input.trim() && pendingImages.length === 0) ||
-                conn === "connecting" ||
-                !projectOpen
-              }
-            >
-              {conn === "busy" ? "排队" : "发送"}
-            </button>
+            {conn === "busy" ? (
+              <button
+                type="button"
+                className="btn danger"
+                onClick={() => onStop?.()}
+              >
+                停下
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void submit(undefined, "auto")}
+                disabled={
+                  (!input.trim() &&
+                    pendingImages.length === 0 &&
+                    pendingFiles.length === 0) ||
+                  conn === "connecting" ||
+                  !projectOpen
+                }
+              >
+                发送
+              </button>
+            )}
           </div>
         </div>
       </div>

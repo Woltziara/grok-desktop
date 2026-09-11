@@ -24,6 +24,11 @@ import { ChatTopbar } from "./components/ChatTopbar";
 import { ColumnResizeHandle } from "./components/ColumnResizeHandle";
 import { WelcomeView } from "./components/WelcomeView";
 import { Composer } from "./components/Composer";
+import { CommandPalette } from "./components/CommandPalette";
+import { FindBar } from "./components/FindBar";
+import { QuestionIndex } from "./components/QuestionIndex";
+import { ScheduledLoopsBar } from "./components/ScheduledLoopsBar";
+import { AppTooltipProvider } from "./components/ui/tooltip";
 import { useColumnLayout } from "./hooks/useColumnLayout";
 import {
   DESKTOP_COMMANDS,
@@ -36,6 +41,31 @@ import {
   runDesktopCommand,
 } from "./lib/desktop-commands";
 import { isMissingBinaryError, type ConnState } from "./lib/conn";
+import { classifyErrorAction } from "../shared/error-actions.mjs";
+import { parkedUpdateNotice } from "../shared/parked-notice.mjs";
+import { folderDisplayName } from "../shared/sidebar-chats.mjs";
+import {
+  mergeDraftSessions,
+  shouldAbandonEmptySession,
+  timelineHasUserSpeech,
+} from "../shared/workspace-org.mjs";
+import {
+  clearUnread,
+  markUnread,
+  popSessionHistory,
+  pushSessionHistory,
+  readDraft,
+  readReading,
+  rememberProjectOrder,
+  saveReading,
+  sessionOrgKey,
+  setArchived,
+  setProjectOrder,
+  setShowArchived,
+  togglePinned,
+  togglePinnedProject,
+  useFlowState,
+} from "./lib/workspace-store";
 import {
   normalizeAutoCompactAt,
   shouldAutoCompact,
@@ -50,6 +80,7 @@ import {
   shouldSendCatchUpAfterUserInsert,
 } from "../shared/compact-prep-flow.mjs";
 import {
+  cutIndexAfterUserId,
   cutIndexBeforeUserId,
   dropUserPromptExecIndex,
   lastUserPromptIndex,
@@ -61,7 +92,7 @@ import { redactSensitiveText } from "./lib/privacy";
 import { samePathKey } from "./lib/path-utils";
 import { hideBootSplash } from "./lib/boot-splash";
 import { applyTheme, readStoredTheme, storeTheme } from "./lib/theme";
-import { finalizeOpenTools, uid } from "./lib/timeline";
+import { uid } from "./lib/timeline";
 import { useAgentEvents } from "./hooks/useAgentEvents";
 import { useAgentSafety } from "./hooks/useAgentSafety";
 import { useProjectSession } from "./hooks/useProjectSession";
@@ -123,7 +154,7 @@ export default function App() {
   const { setFilesDirty, confirmDiscardFiles } = useUnsavedGuard();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
-    "mcp" | "plugins" | "skills" | null
+    "mcp" | "plugins" | "skills" | "memory" | "peer" | null
   >(null);
   const [offerAgentRestart, setOfferAgentRestart] = useState(false);
   const [agentCommands, setAgentCommands] = useState<SlashCommand[]>([]);
@@ -143,6 +174,24 @@ export default function App() {
   const modelApplyGen = useRef(0);
   const loginGen = useRef(0);
   const [loginDeviceAuth, setLoginDeviceAuth] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findId, setFindId] = useState<string | null>(null);
+  const [reviveNonce, setReviveNonce] = useState(0);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const [bundleStale, setBundleStale] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const flow = useFlowState();
+  const hiddenAtRef = useRef(0);
+  const notifiedTaskRef = useRef(new Set<string>());
+  const notifiedNeedRef = useRef("");
+  const prevSessionRef = useRef<{
+    cwd: string;
+    sessionId: string;
+    hadUserSpeech: boolean;
+    hasDraft: boolean;
+  } | null>(null);
 
   const appendSystem = useCallback((text: string) => {
     setItems((prev) => [
@@ -171,6 +220,7 @@ export default function App() {
   const {
     permissions,
     backgroundTasks,
+    scheduledTasks,
     sessionUsage,
     sessionMode,
     planApproval,
@@ -180,6 +230,8 @@ export default function App() {
     clearSessionScoped,
     revokeWritesThisSession,
     hydrateBackgroundTasks,
+    hydrateScheduledTasks,
+    dropScheduledTask,
     hydrateSessionUsage,
     syncPermissionsFromMain,
     onPermission,
@@ -191,6 +243,11 @@ export default function App() {
     onUserQuestion,
     onFolderTrust,
     onMcpElicit,
+    beginOpening,
+    bindOpeningSession,
+    abortOpening,
+    finishOpening,
+    applyOpenTimeline,
   } = useAgentEvents({
     openingRef,
     setConn,
@@ -256,10 +313,23 @@ export default function App() {
     return `${items.length}:${last.id}:${last.kind}:${tail}`;
   }, [items]);
 
-  const { pinToBottom } = useStickToBottom(
+  const {
+    pinToBottom,
+    hasNewContent,
+    clearNewContent,
+    stuckToBottom,
+  } = useStickToBottom(
     timelineRef,
     timelineScrollKey,
     `${project ?? ""}:${sessionId ?? ""}`,
+    {
+      restoreTop:
+        project && sessionId ? readReading(project, sessionId) : null,
+      onScrollPosition: (top) => {
+        if (openingRef.current) return;
+        if (project && sessionId) saveReading(project, sessionId, top);
+      },
+    },
   );
 
   const {
@@ -272,6 +342,9 @@ export default function App() {
     submitFromComposer,
     queueNextPrompt,
     sendQueuedNow,
+    stopTurn,
+    moveQueued,
+    editQueued,
   } = usePromptDelivery({
     project,
     conn,
@@ -284,6 +357,7 @@ export default function App() {
     refreshAuth: () => {
       void refreshAuth();
     },
+    onDeliveryFailed: () => setReviveNonce((n) => n + 1),
   });
 
   const signedIn = Boolean(auth?.authenticated && !auth?.expired);
@@ -322,9 +396,15 @@ export default function App() {
       clearSessionScoped,
       revokeWritesThisSession,
       hydrateBackgroundTasks,
+      hydrateScheduledTasks,
       hydrateSessionUsage,
       syncPermissionsFromMain,
       hydrateFromInfo,
+      beginOpening,
+      bindOpeningSession,
+      abortOpening,
+      finishOpening,
+      applyOpenTimeline,
       refreshAuth,
       refreshBackbone,
       setBackbone,
@@ -422,6 +502,24 @@ export default function App() {
     };
   }, [project, sessionId, sessions, info?.recentProjects]);
 
+  const sidebarSessions = useMemo(
+    () =>
+      mergeDraftSessions(
+        catalog.length ? catalog : sessions,
+        flow.drafts,
+      ) as SessionSummary[],
+    [catalog, sessions, flow.drafts],
+  );
+
+  useEffect(() => {
+    const known = [
+      project,
+      ...(info?.recentProjects || []),
+      ...sidebarSessions.map((s) => s.cwd),
+    ].filter(Boolean) as string[];
+    rememberProjectOrder(known);
+  }, [project, info?.recentProjects, sidebarSessions]);
+
   useEffect(() => {
     if (typeof window.grokDesktop.listLiveTurns !== "function") return;
     let stop = false;
@@ -446,6 +544,158 @@ export default function App() {
     if (conn === "busy" && sessionId) ids.add(sessionId);
     return [...ids];
   }, [liveTurnIds, conn, sessionId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    return window.grokDesktop.on("app:find", () => setFindOpen(true));
+  }, []);
+
+  useEffect(() => {
+    return window.grokDesktop.on("app:notify-click", (payload) => {
+      const sid = String((payload as { sessionId?: string })?.sessionId || "");
+      const cwd = String((payload as { cwd?: string })?.cwd || "");
+      if (!sid) return;
+      if (cwd && project && !samePathKey(cwd, project)) {
+        void openProject(cwd, { mode: "resume", sessionId: sid });
+      } else {
+        void openSession({ mode: "resume", sessionId: sid });
+      }
+    });
+  }, [project, openProject, openSession]);
+
+  useEffect(() => {
+    if (!info?.packaged) return;
+    if (info.bundleStale) setBundleStale(true);
+    const t = window.setInterval(() => {
+      void window.grokDesktop.bundleStale?.().then((r) => {
+        if (r?.stale) setBundleStale(true);
+      });
+    }, 20000);
+    return () => window.clearInterval(t);
+  }, [info?.packaged, info?.bundleStale]);
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") hiddenAtRef.current = Date.now();
+      else {
+        const hiddenFor = Date.now() - (hiddenAtRef.current || 0);
+        if (hiddenFor > 30_000 && project) {
+          setReconnecting(true);
+          void (async () => {
+            try {
+              const ping = await window.grokDesktop.pingAgent?.();
+              if (ping && ping.ok === false) {
+                await restartAgent();
+                return;
+              }
+              await window.grokDesktop.getInfo();
+            } finally {
+              setReconnecting(false);
+            }
+          })();
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [project, restartAgent]);
+
+  useEffect(() => {
+    if (!project || !sessionId) return;
+    const needsYou =
+      permissions.length > 0 || Boolean(planApproval) || Boolean(userQuestion);
+    if (!needsYou) {
+      notifiedNeedRef.current = "";
+      return;
+    }
+    markUnread(project, sessionId, { needsYou: true, unread: true });
+    const key = `${planApproval?.reqId || ""}:${userQuestion?.reqId || ""}:${permissions[0]?.reqId || ""}`;
+    if (notifiedNeedRef.current === key) return;
+    notifiedNeedRef.current = key;
+    if (!document.hasFocus() && window.grokDesktop.notify) {
+      void window.grokDesktop.notify({
+        title: "Grok Desktop",
+        body: "有一步需要你决定",
+        sessionId,
+        cwd: project,
+      });
+    }
+  }, [permissions, planApproval, userQuestion, project, sessionId]);
+
+  useEffect(() => {
+    if (!project || !sessionId) return;
+    for (const task of backgroundTasks) {
+      if (task.status !== "completed" && task.status !== "failed") continue;
+      if (notifiedTaskRef.current.has(task.id)) continue;
+      notifiedTaskRef.current.add(task.id);
+      if (!document.hasFocus()) {
+        markUnread(project, sessionId, {
+          unread: true,
+          failed: task.status === "failed",
+        });
+        void window.grokDesktop.notify?.({
+          title: "Grok Desktop",
+          body: task.status === "failed" ? "有任务失败了" : "后台任务做完了",
+          sessionId,
+          cwd: project,
+        });
+      }
+    }
+  }, [backgroundTasks, project, sessionId]);
+
+  useEffect(() => {
+    if (!project || !sessionId) return;
+    if (!document.hasFocus()) return;
+    if (!stuckToBottom) return;
+    clearUnread(project, sessionId);
+  }, [project, sessionId, stuckToBottom]);
+
+  useEffect(() => {
+    return window.grokDesktop.on("agent:parked-update", (payload) => {
+      const row = payload as {
+        sessionId?: string;
+        cwd?: string;
+        params?: unknown;
+        needsYou?: boolean;
+      };
+      const sid = String(row.sessionId || "");
+      const cwd = String(row.cwd || "");
+      if (!sid || !cwd) return;
+      let notice = row.needsYou
+        ? { unread: true, failed: false, needsYou: true }
+        : parkedUpdateNotice(row.params);
+      if (!notice) return;
+      markUnread(cwd, sid, notice);
+      if (!document.hasFocus() || sid !== sessionIdRef.current) {
+        void window.grokDesktop.notify?.({
+          title: "Grok Desktop",
+          body: notice.needsYou
+            ? "有一步需要你决定"
+            : notice.failed
+              ? "有任务失败了"
+              : "有新结果",
+          sessionId: sid,
+          cwd,
+        });
+      }
+    });
+  }, []);
 
   const closeWorktreeDialog = useCallback(() => {
     setWorktreeDialog(null);
@@ -533,6 +783,14 @@ export default function App() {
       const next = (payload || {}) as LoginProgress;
       setLoginProgress(next);
       if (next.output) setAuthMessage(next.output);
+    });
+  }, []);
+
+  useEffect(() => {
+    return window.grokDesktop.on("auth:changed", (payload) => {
+      if (payload && typeof payload === "object") {
+        setAuth(payload as AuthStatus);
+      }
     });
   }, []);
 
@@ -1239,7 +1497,7 @@ export default function App() {
         : "platform-linux";
 
   const onOpenSettings = useCallback(
-    (section?: "mcp" | "plugins" | "skills") => {
+    (section?: "mcp" | "plugins" | "skills" | "memory" | "peer") => {
       setSettingsSection(section || null);
       setSettingsOpen(true);
     },
@@ -1248,6 +1506,75 @@ export default function App() {
   const onComposerError = useCallback((message: string) => {
     setError(message);
   }, []);
+
+  const rewindToUser = useCallback(
+    async (id: string) => {
+      if (!project || openingRef.current) return;
+      if (conn !== "online" || busyRef.current) {
+        appendSystem("空闲时才能退回刚才那句。");
+        return;
+      }
+      const index = userPromptIndexOf(items, id);
+      if (index < 0) return;
+      if (
+        !window.confirm(
+          "这句话之后的对话会从画面上拿掉。已经改过的文件不会还原。确定吗？",
+        )
+      ) {
+        return;
+      }
+      if (typeof window.grokDesktop.rewind !== "function") {
+        appendSystem(
+          "请重新打开 Grok Desktop 窗口后再退回（当前窗口还没有这个能力）。",
+        );
+        return;
+      }
+      try {
+        await window.grokDesktop.rewind(index);
+        setItems((prev) => prev.slice(0, cutIndexAfterUserId(prev, id)));
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg || "退回失败");
+        appendSystem(`没退成：${msg}`);
+      }
+    },
+    [project, conn, items, appendSystem, setError],
+  );
+
+  const stopScheduledTask = useCallback(
+    async (taskId: string) => {
+      try {
+        await window.grokDesktop.deleteScheduledTask({
+          taskId,
+          sessionId: sessionId || undefined,
+        });
+        dropScheduledTask(taskId);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg || "没停成");
+        appendSystem(`没停成：${msg}`);
+      }
+    },
+    [sessionId, appendSystem, setError, dropScheduledTask],
+  );
+
+  const exportChat = useCallback(async () => {
+    const title =
+      sessions.find((s) => s.id === sessionId)?.title || "对话";
+    try {
+      const res = await window.grokDesktop.exportChat({
+        items,
+        title,
+        project: project || undefined,
+      });
+      if (res?.ok && res.path) {
+        appendSystem(`已导出到 ${res.path}`);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg || "导出失败");
+    }
+  }, [items, sessions, sessionId, project, appendSystem, setError]);
 
   const columns = useColumnLayout();
   expandPanelRef.current = columns.expandPanel;
@@ -1407,7 +1734,19 @@ export default function App() {
             backbone={backbone}
             project={project}
             sessionId={sessionId}
-            sessions={catalog.length ? catalog : sessions}
+            sessions={sidebarSessions}
+            projectOrder={flow.projectOrder}
+            onProjectOrder={setProjectOrder}
+            pinned={flow.pinned}
+            archived={flow.archived}
+            unread={flow.unread}
+            showArchived={flow.showArchived}
+            onTogglePinned={togglePinned}
+            pinnedProjects={flow.pinnedProjects}
+            onTogglePinnedProject={togglePinnedProject}
+            onArchive={(cwd, id) => setArchived(cwd, id, true)}
+            onUnarchive={(cwd, id) => setArchived(cwd, id, false)}
+            onToggleShowArchived={() => setShowArchived(!flow.showArchived)}
             recentProjects={info?.recentProjects || []}
             liveSessionIds={liveSessionIds}
             conn={conn}
@@ -1433,20 +1772,54 @@ export default function App() {
               ) {
                 return;
               }
-              if (opts.cwd && !samePathKey(opts.cwd, project)) {
-                if (!confirmDiscardFiles()) return;
-                void openProject(opts.cwd, {
-                  mode: "resume",
-                  sessionId: opts.sessionId,
-                });
-                return;
+              if (project && sessionId) {
+                prevSessionRef.current = {
+                  cwd: project,
+                  sessionId,
+                  hadUserSpeech: timelineHasUserSpeech(items),
+                  hasDraft: Boolean(readDraft(project, sessionId)),
+                };
+                pushSessionHistory(project, sessionId);
               }
-              void openSession(opts);
+              const go = async () => {
+                if (opts.cwd && !samePathKey(opts.cwd, project)) {
+                  if (!confirmDiscardFiles()) return;
+                  await openProject(opts.cwd, {
+                    mode: opts.mode === "new" ? "new" : "resume",
+                    sessionId: opts.mode === "new" ? undefined : opts.sessionId,
+                  });
+                } else {
+                  await openSession(opts);
+                }
+                const prev = prevSessionRef.current;
+                const nextId = sessionIdRef.current;
+                if (
+                  prev &&
+                  shouldAbandonEmptySession({
+                    sessionId: prev.sessionId,
+                    nextSessionId: nextId || "",
+                    hadUserSpeech: prev.hadUserSpeech,
+                    hasDraft: prev.hasDraft,
+                  })
+                ) {
+                  try {
+                    await window.grokDesktop.deleteSession({
+                      cwd: prev.cwd,
+                      sessionId: prev.sessionId,
+                    });
+                  } catch {
+                    /* empty shell may already be gone */
+                  }
+                }
+                setFocusNonce((n) => n + 1);
+              };
+              void go();
             }}
             onRenameSession={(opts) => renameSession(opts)}
             onDeleteSession={(opts) => deleteSession(opts)}
             onLogout={() => void handleLogout()}
             onOpenSettingsSection={onOpenSettings}
+            onExportChat={() => void exportChat()}
             inert={settingsOpen}
           />
           <ColumnResizeHandle
@@ -1483,12 +1856,25 @@ export default function App() {
             isOpening={isOpening}
             backgroundTasks={backgroundTasks}
             onOpenPreview={() => openSideBrowser()}
-            onStop={() => {
-              setItems((prev) => finalizeOpenTools(prev, "cancelled"));
-              void window.grokDesktop.cancel();
-            }}
+            onStop={stopTurn}
             panelCollapsed={columns.panelCollapsed}
             onTogglePanel={columns.togglePanel}
+            reconnecting={reconnecting}
+            onBack={() => {
+              const prev = popSessionHistory(project, sessionId || "");
+              if (!prev) return;
+              if (!samePathKey(prev.cwd, project)) {
+                void openProject(prev.cwd, {
+                  mode: "resume",
+                  sessionId: prev.sessionId,
+                });
+              } else {
+                void openSession({
+                  mode: "resume",
+                  sessionId: prev.sessionId,
+                });
+              }
+            }}
           />
 
           {isOpening && (
@@ -1509,28 +1895,131 @@ export default function App() {
             </div>
           )}
 
+          {bundleStale ? (
+            <div className="stale-banner" role="status">
+              新版已安装，重启后生效
+              <button
+                type="button"
+                className="btn primary btn-sm"
+                onClick={() => {
+                  if (conn === "busy") {
+                    if (!window.confirm("正在回复。现在重启会打断当前工作，确定吗？")) {
+                      return;
+                    }
+                  }
+                  void window.grokDesktop.relaunchApp?.();
+                }}
+              >
+                现在重启
+              </button>
+            </div>
+          ) : null}
           {error && (
             <div className="error-banner">
               {redact(error)}
-              {isAuthError(error) ? (
-                <button
-                  className="btn"
-                  type="button"
-                  style={{ marginLeft: 12 }}
-                  onClick={() => {
-                    if (!confirmDiscardFiles()) return;
-                    void leaveProject();
-                  }}
-                >
-                  Sign in again
-                </button>
-              ) : null}
+              {(() => {
+                const action = classifyErrorAction(error);
+                if (!action) return null;
+                if (action.kind === "signin" || isAuthError(error)) {
+                  return (
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ marginLeft: 12 }}
+                      onClick={() => {
+                        if (!confirmDiscardFiles()) return;
+                        void leaveProject();
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                }
+                if (action.kind === "retry") {
+                  return (
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ marginLeft: 12 }}
+                      onClick={() => {
+                        setError(null);
+                        setReviveNonce((n) => n + 1);
+                        void (async () => {
+                          const ping = await window.grokDesktop.pingAgent?.();
+                          if (ping && ping.ok === false) await restartAgent();
+                        })();
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                }
+                if (action.kind === "reselect") {
+                  return (
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ marginLeft: 12 }}
+                      onClick={() => {
+                        setError(null);
+                        if (typeof window.grokDesktop.pickFiles === "function") {
+                          void window.grokDesktop.pickFiles().then((paths) => {
+                            if (paths?.length) {
+                              window.dispatchEvent(
+                                new CustomEvent("grok-import-attachments", {
+                                  detail: { paths },
+                                }),
+                              );
+                            }
+                          });
+                        }
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                }
+                if (action.kind === "install") {
+                  return (
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ marginLeft: 12 }}
+                      onClick={() => {
+                        setError(null);
+                        void window.grokDesktop.openInstallDocs();
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    className="btn ghost btn-sm"
+                    type="button"
+                    style={{ marginLeft: 12 }}
+                    onClick={() => setError(null)}
+                  >
+                    {action.label}
+                  </button>
+                );
+              })()}
             </div>
           )}
 
           <div className="timeline" ref={timelineRef}>
+            <QuestionIndex
+              items={items}
+              onJump={(id) => {
+                document.getElementById(`msg-${id}`)?.scrollIntoView({
+                  block: "center",
+                });
+              }}
+            />
             <MessageList
               items={items}
+              highlightQuery={findOpen ? findQuery : ""}
               bottomRef={bottomRef}
               knownCommands={allCommands}
               pendingPermissions={permissions}
@@ -1544,8 +2033,21 @@ export default function App() {
               onCancelEditUser={() => setEditingUserId(null)}
               onSubmitEditUser={(id, text) => void submitEditedUser(id, text)}
               onBranchAssistant={(id) => void branchFromAssistant(id)}
+              onRewindUser={(id) => void rewindToUser(id)}
             />
           </div>
+            {hasNewContent ? (
+              <button
+                type="button"
+                className="new-content-banner"
+                onClick={() => {
+                  clearNewContent();
+                  pinToBottom();
+                }}
+              >
+                有新内容，回到底部
+              </button>
+            ) : null}
 
           <ApprovalsDock
             permissions={permissions}
@@ -1556,6 +2058,12 @@ export default function App() {
             onAllowWritesThisSession={() => void onAllowWritesThisSession()}
           />
 
+          <ScheduledLoopsBar
+            loops={scheduledTasks}
+            busy={conn === "busy"}
+            onStop={(id) => void stopScheduledTask(id)}
+          />
+
           <Composer
             key={sessionId || "no-session"}
             conn={conn}
@@ -1563,10 +2071,18 @@ export default function App() {
             commands={allCommands}
             promptQueue={promptQueue}
             onSubmit={submitFromComposer}
+            onStop={stopTurn}
             onLocalCommand={handleLocalCommand}
             onSendQueuedNow={sendQueuedNow}
             onRemoveQueued={removeQueued}
+            onQueueEdit={editQueued}
+            onQueueMove={moveQueued}
             onError={onComposerError}
+            sessionCwd={project}
+            sessionId={sessionId}
+            projectName={folderDisplayName(project)}
+            reviveNonce={reviveNonce}
+            focusNonce={focusNonce}
             modelId={modelId}
             modelName={modelName}
             pendingModelId={pendingModelId}
@@ -1619,6 +2135,68 @@ export default function App() {
         </div>
       </div>
 
+        <FindBar
+          open={findOpen}
+          query={findQuery}
+          onQuery={setFindQuery}
+          items={items}
+          activeId={findId}
+          onClose={() => {
+            setFindOpen(false);
+            setFindQuery("");
+            setFindId(null);
+          }}
+          onJump={(hit) => {
+            setFindId(hit.key);
+            document.getElementById(`msg-${hit.id}`)?.scrollIntoView({
+              block: "center",
+            });
+          }}
+        />
+        <CommandPalette
+          open={paletteOpen}
+          sessions={sidebarSessions}
+          projects={(info?.recentProjects || []).map((cwd) => ({
+            cwd,
+            name: folderDisplayName(cwd),
+          }))}
+          onOpenProject={(cwd) => {
+            if (!confirmDiscardFiles()) return;
+            void openProject(cwd, { mode: "continue" });
+          }}
+          commands={[
+            {
+              id: "new",
+              title: "新对话",
+              subtitle: "在当前项目里开一场",
+              run: () => void openSession({ mode: "new" }),
+            },
+            {
+              id: "folder",
+              title: "打开文件夹",
+              run: () => void pickProject(),
+            },
+            {
+              id: "settings",
+              title: "设置",
+              run: () => onOpenSettings(),
+            },
+          ]}
+          onClose={() => setPaletteOpen(false)}
+          onOpenSession={(opts) => {
+            if (opts.cwd && !samePathKey(opts.cwd, project)) {
+              void openProject(opts.cwd, {
+                mode: "resume",
+                sessionId: opts.sessionId,
+              });
+            } else {
+              void openSession({
+                mode: "resume",
+                sessionId: opts.sessionId,
+              });
+            }
+          }}
+        />
         {worktreeOverlay}
         {settingsDialog}
 

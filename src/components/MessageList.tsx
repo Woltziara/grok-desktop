@@ -50,6 +50,10 @@ import {
   copyMarkdownRich,
   installCopySelectionMarkdownHook,
 } from "../lib/copy-formatted";
+import { CopyMenu } from "./CopyMenu";
+import { Highlight, highlightChildText } from "./Highlight";
+import { FileResultActions } from "./FileResultActions";
+import { toolFilePath, isFileWriteTool } from "../lib/tool-display";
 
 /** Stable empties so default props do not bust React.memo every parent render. */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -175,6 +179,28 @@ function IconBranch() {
       <circle cx="18" cy="12" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
       <path
         d="M6 8.2v7.6M8.1 6.8c4 0 5.2 2.2 7.7 4.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function IconRewind() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M9 7 4 12l5 5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M20 12H4"
         fill="none"
         stroke="currentColor"
         strokeWidth="1.8"
@@ -428,6 +454,7 @@ function TurnClock({ startedAt }: { startedAt: number }) {
 const TimelineRow = memo(function TimelineRow({
   item,
   showDay,
+  highlightQuery = "",
   knownCommands,
   nextAt,
   isLast,
@@ -441,9 +468,11 @@ const TimelineRow = memo(function TimelineRow({
   onCancelEditUser,
   onSubmitEditUser,
   onBranchAssistant,
+  onRewindUser,
 }: {
   item: TimelineItem;
   showDay: boolean;
+  highlightQuery?: string;
   knownCommands: SlashCommand[];
   nextAt?: number;
   isLast: boolean;
@@ -457,6 +486,7 @@ const TimelineRow = memo(function TimelineRow({
   onCancelEditUser?: () => void;
   onSubmitEditUser?: (id: string, text: string) => void;
   onBranchAssistant?: (id: string) => void;
+  onRewindUser?: (id: string) => void;
 }) {
   const { redact } = usePrivacy();
   const day =
@@ -487,6 +517,8 @@ const TimelineRow = memo(function TimelineRow({
       <Fragment>
         {day}
         <article
+          id={`msg-${item.id}`}
+          data-msg-id={item.id}
           className={`msg user-prose${isCmd ? " user-command" : ""}${isEditing ? " is-editing" : ""}`}
         >
           {item.images && item.images.length > 0 && !isEditing && (
@@ -539,7 +571,9 @@ const TimelineRow = memo(function TimelineRow({
                   {restLines ? <div className="cmd-rest">{restLines}</div> : null}
                 </div>
               ) : (
-                <div className="body">{displayText}</div>
+                <div className="body">
+                  <Highlight text={displayText} query={highlightQuery} />
+                </div>
               )}
             </div>
           ) : null}
@@ -564,6 +598,15 @@ const TimelineRow = memo(function TimelineRow({
                   <IconPencil />
                 </UserActionButton>
               ) : null}
+              {onRewindUser && nextKind ? (
+                <UserActionButton
+                  label="回到这里"
+                  disabled={turnActive}
+                  onClick={() => onRewindUser(item.id)}
+                >
+                  <IconRewind />
+                </UserActionButton>
+              ) : null}
             </div>
           ) : null}
         </article>
@@ -578,18 +621,33 @@ const TimelineRow = memo(function TimelineRow({
     return (
       <Fragment>
         {day}
-        <article className="msg grok-prose">
+        <article
+          id={`msg-${item.id}`}
+          data-msg-id={item.id}
+          className="msg grok-prose"
+        >
           <div className="body markdown markdown-body">
             <ReactMarkdown
               remarkPlugins={REMARK_PLUGINS}
-              components={MD_COMPONENTS}
+              components={{
+                ...MD_COMPONENTS,
+                p: ({ children }) => (
+                  <p>{highlightChildText(children, highlightQuery)}</p>
+                ),
+                li: ({ children }) => (
+                  <li>{highlightChildText(children, highlightQuery)}</li>
+                ),
+                td: ({ children }) => (
+                  <td>{highlightChildText(children, highlightQuery)}</td>
+                ),
+              }}
             >
               {display}
             </ReactMarkdown>
           </div>
           {display.trim() ? (
             <div className="assistant-actions">
-              <MsgCopyButton text={display} rich />
+              <CopyMenu markdown={display} />
               {onBranchAssistant ? (
                 <UserActionButton
                   label="从这里开一条新对话"
@@ -655,6 +713,11 @@ const TimelineRow = memo(function TimelineRow({
       item.status === "in_progress" ||
       item.status === "pending" ||
       item.status === "running";
+    const filePath = toolFilePath(item);
+    const showFileActions =
+      Boolean(filePath) &&
+      isFileWriteTool(item.toolKind, item.title, item.raw) &&
+      item.status === "completed";
     return (
       <Fragment>
         {day}
@@ -681,6 +744,9 @@ const TimelineRow = memo(function TimelineRow({
                 </pre>
               ) : null}
             </div>
+          ) : null}
+          {showFileActions && filePath ? (
+            <FileResultActions path={filePath} />
           ) : null}
         </InlineActivity>
       </Fragment>
@@ -895,6 +961,7 @@ function shouldShowTurnWaiting(items: TimelineItem[]): boolean {
 
 export const MessageList = memo(function MessageList({
   items,
+  highlightQuery = "",
   bottomRef,
   knownCommands,
   pendingPermissions,
@@ -908,8 +975,10 @@ export const MessageList = memo(function MessageList({
   onCancelEditUser,
   onSubmitEditUser,
   onBranchAssistant,
+  onRewindUser,
 }: {
   items: TimelineItem[];
+  highlightQuery?: string;
   bottomRef: RefObject<HTMLDivElement | null>;
   /** Skills + agent + desktop commands for slash recognition in user bubbles */
   knownCommands?: SlashCommand[];
@@ -927,6 +996,7 @@ export const MessageList = memo(function MessageList({
   onCancelEditUser?: () => void;
   onSubmitEditUser?: (id: string, text: string) => void;
   onBranchAssistant?: (id: string) => void;
+  onRewindUser?: (id: string) => void;
 }) {
   const cmds = knownCommands ?? EMPTY_COMMANDS;
   const perms = pendingPermissions ?? EMPTY_PERMISSIONS;
@@ -978,6 +1048,7 @@ export const MessageList = memo(function MessageList({
                   key={item.id}
                   item={item}
                   showDay={false}
+                  highlightQuery={highlightQuery}
                   knownCommands={cmds}
                   nextAt={
                     typeof cluster.items[j + 1]?.at === "number"
@@ -995,6 +1066,7 @@ export const MessageList = memo(function MessageList({
                   onCancelEditUser={onCancelEditUser}
                   onSubmitEditUser={onSubmitEditUser}
                   onBranchAssistant={onBranchAssistant}
+                  onRewindUser={onRewindUser}
                 />
               ))}
             </Fragment>
@@ -1021,6 +1093,7 @@ export const MessageList = memo(function MessageList({
             key={item.id}
             item={item}
             showDay={showDay}
+            highlightQuery={highlightQuery}
             knownCommands={cmds}
             nextAt={typeof nextItem?.at === "number" ? nextItem.at : undefined}
             isLast={turnActive && i === clusters.length - 1}
@@ -1034,6 +1107,7 @@ export const MessageList = memo(function MessageList({
             onCancelEditUser={onCancelEditUser}
             onSubmitEditUser={onSubmitEditUser}
             onBranchAssistant={onBranchAssistant}
+            onRewindUser={onRewindUser}
           />
         );
       })}

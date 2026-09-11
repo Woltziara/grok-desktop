@@ -6,6 +6,8 @@ export type SettingsPageId =
   | "engine"
   | "agent"
   | "coding-data"
+  | "memory"
+  | "peer"
   | "mcp"
   | "plugins"
   | "skills"
@@ -34,6 +36,8 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     label: "Agent",
     items: [
       { id: "agent", label: "Safety" },
+      { id: "memory", label: "记忆" },
+      { id: "peer", label: "两台电脑" },
       { id: "coding-data", label: "Coding data" },
     ],
   },
@@ -58,6 +62,8 @@ export const PAGE_TITLES: Record<SettingsPageId, string> = {
   general: "General",
   engine: "Engine",
   agent: "Safety",
+  memory: "记忆",
+  peer: "两台电脑",
   "coding-data": "Coding data",
   mcp: "MCP servers",
   plugins: "Plugins",
@@ -67,13 +73,27 @@ export const PAGE_TITLES: Record<SettingsPageId, string> = {
 };
 
 export function pageFromFocus(
-  focus: "mcp" | "plugins" | "skills" | null | undefined,
+  focus: "mcp" | "plugins" | "skills" | "memory" | "peer" | null | undefined,
 ): SettingsPageId {
-  if (focus === "mcp" || focus === "plugins" || focus === "skills") return focus;
+  if (
+    focus === "mcp" ||
+    focus === "plugins" ||
+    focus === "skills" ||
+    focus === "memory" ||
+    focus === "peer"
+  ) {
+    return focus;
+  }
   return "general";
 }
 
-export type SettingsFocusSection = "mcp" | "plugins" | "skills" | null;
+export type SettingsFocusSection =
+  | "mcp"
+  | "plugins"
+  | "skills"
+  | "memory"
+  | "peer"
+  | null;
 
 export type SettingsSharedProps = {
   theme: "dark" | "light";

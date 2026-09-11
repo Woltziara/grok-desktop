@@ -162,6 +162,30 @@ function takeParkedAgent(ws, sessionId) {
   return a;
 }
 
+/**
+ * Live or parked agent for this session id (timed loops keep running while parked).
+ * @param {WindowSession | null | undefined} ws
+ * @param {string} [sessionId]
+ */
+export function agentForSession(ws, sessionId) {
+  if (!ws) return null;
+  const sid = String(sessionId || ws.agent?.sessionId || "").trim();
+  if (ws.agent?.sessionId && String(ws.agent.sessionId) === sid) return ws.agent;
+  if (!sid) return ws.agent || null;
+  return parkedMap(ws).get(sid) || ws.agent || null;
+}
+
+/** Any live or parked agent on this window (account billing). */
+export function anyAgent(ws) {
+  if (!ws) return null;
+  if (ws.agent?.ready) return ws.agent;
+  const map = parkedMap(ws);
+  for (const a of map.values()) {
+    if (a?.ready) return a;
+  }
+  return null;
+}
+
 async function killParkedAgents(ws) {
   const map = parkedMap(ws);
   const list = [...map.values()];
@@ -459,7 +483,11 @@ export function restartBackgroundTaskTail(ws, cwd, sessionId) {
     cwd,
     sessionId,
     onParams: (params) => {
-      send(ws, "agent:session-update", params);
+      const payload =
+        params && typeof params === "object"
+          ? { ...params, sessionId: params.sessionId || sessionId || null }
+          : { update: params, sessionId: sessionId || null };
+      send(ws, "agent:session-update", payload);
     },
   });
 }
@@ -599,15 +627,38 @@ export function ensureAgent(ws, cwd, opts = {}) {
       };
     };
 
-    agent.on(
-      "session-update",
-      ifCurrent((params) => {
+    agent.on("session-update", (params) => {
+      if (ws.disposed) return;
+      const payload =
+        params && typeof params === "object"
+          ? {
+              ...params,
+              sessionId:
+                params.sessionId ||
+                params.session_id ||
+                agent.sessionId ||
+                null,
+            }
+          : { update: params, sessionId: agent.sessionId || null };
+      if (ws.agent === agent) {
         if (isDebugLogging()) {
-          debugLog("acp", "session-update", summarizeSessionUpdate(params));
+          debugLog("acp", "session-update", summarizeSessionUpdate(payload));
         }
-        send(ws, "agent:session-update", params);
-      }),
-    );
+        send(ws, "agent:session-update", payload);
+        return;
+      }
+      send(ws, "agent:parked-update", {
+        sessionId: agent.sessionId || null,
+        cwd: agent.cwd || null,
+        params: payload,
+      });
+    });
+
+    // Parked chats still receive loop fires; do not gate on the live agent.
+    agent.on("scheduled-inject", (inject) => {
+      if (ws.disposed) return;
+      agent.enqueueScheduledPrompt(inject);
+    });
 
     agent.on(
       "mcp-status",
@@ -889,12 +940,15 @@ export async function openSessionOnWindow(ws, opts) {
   let history = [];
   /** @type {any[]} */
   let backgroundTasks = [];
+  /** @type {any[]} */
+  let scheduledTasks = [];
   /** @type {any} */
   let usage = null;
   if (client.sessionId && !forceNew && opts.loadState) {
     const loaded = opts.loadState(cwd, client.sessionId);
     history = loaded.items || [];
     backgroundTasks = loaded.tasks || [];
+    scheduledTasks = loaded.scheduledTasks || [];
     usage = loaded.usage || null;
   }
 
@@ -906,7 +960,9 @@ export async function openSessionOnWindow(ws, opts) {
     ...client._modelsPublic(),
     history,
     backgroundTasks,
+    scheduledTasks,
     usage,
+    historySeq: Number(client.updateSeq) || 0,
     sessions: opts.listSessions?.(cwd) || [],
     warning: resumeWarning,
     turnOpen: Boolean(client.turnOpen),
@@ -983,12 +1039,15 @@ export async function restartAgentOnWindow(ws, opts = {}) {
   let history = [];
   /** @type {any[]} */
   let backgroundTasks = [];
+  /** @type {any[]} */
+  let scheduledTasks = [];
   /** @type {any} */
   let usage = null;
   if (client.sessionId && resumed && opts.loadState) {
     const loaded = opts.loadState(target.cwd, client.sessionId);
     history = loaded.items || [];
     backgroundTasks = loaded.tasks || [];
+    scheduledTasks = loaded.scheduledTasks || [];
     usage = loaded.usage || null;
   }
 
@@ -1001,7 +1060,9 @@ export async function restartAgentOnWindow(ws, opts = {}) {
     modelName: client.currentModelName || null,
     history,
     backgroundTasks,
+    scheduledTasks,
     usage,
+    historySeq: Number(client.updateSeq) || 0,
     sessions: opts.listSessions?.(target.cwd) || [],
     warning: resumeWarning,
   };

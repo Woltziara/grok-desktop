@@ -7,6 +7,11 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
+import {
+  dropQueuedItem,
+  editQueuedItem,
+  moveQueuedItem,
+} from "../../shared/queue-order.mjs";
 import type { ComposerSubmit, QueuedPrompt } from "../components/Composer";
 import {
   previewCaptureRefuseError,
@@ -31,6 +36,10 @@ export function usePromptDelivery(opts: {
   setError: Dispatch<SetStateAction<string | null>>;
   setItems: Dispatch<SetStateAction<TimelineItem[]>>;
   refreshAuth: () => void;
+  onDeliveryFailed?: (payload: {
+    text: string;
+    images: PendingImage[];
+  }) => void;
 }) {
   const {
     project,
@@ -42,6 +51,7 @@ export function usePromptDelivery(opts: {
     setError,
     setItems,
     refreshAuth,
+    onDeliveryFailed,
   } = opts;
 
   const [promptQueue, setPromptQueue] = useState<QueuedPrompt[]>([]);
@@ -95,11 +105,27 @@ export function usePromptDelivery(opts: {
 
   const removeQueued = useCallback((id: string) => {
     setPromptQueue((prev) => {
-      const next = prev.filter((q) => q.id !== id);
+      const next = dropQueuedItem(prev, id);
       promptQueueRef.current = next;
       return next;
     });
     if (sendNowRef.current?.id === id) sendNowRef.current = null;
+  }, []);
+
+  const moveQueued = useCallback((id: string, dir: number) => {
+    setPromptQueue((prev) => {
+      const next = moveQueuedItem(prev, id, dir);
+      promptQueueRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const editQueued = useCallback((id: string, text: string) => {
+    setPromptQueue((prev) => {
+      const next = editQueuedItem(prev, id, text);
+      promptQueueRef.current = next;
+      return next;
+    });
   }, []);
 
   const deliverPrompt = useCallback(
@@ -184,6 +210,7 @@ export function usePromptDelivery(opts: {
             },
           ]);
           if (isAuthError(msg)) refreshAuth();
+          onDeliveryFailed?.({ text, images });
         }
       } finally {
         if (stale()) {
@@ -240,6 +267,7 @@ export function usePromptDelivery(opts: {
       setError,
       setItems,
       refreshAuth,
+      onDeliveryFailed,
     ],
   );
 
@@ -254,6 +282,7 @@ export function usePromptDelivery(opts: {
       text,
       images,
       imageQuality = "compact",
+      mode = "auto",
     }: ComposerSubmit): Promise<boolean> => {
       if (!project || openingRef.current || conn === "connecting") {
         return false;
@@ -262,9 +291,11 @@ export function usePromptDelivery(opts: {
 
       if (busyRef.current) {
         const item = enqueuePrompt(text, images, imageQuality);
-        sendNowRef.current = item;
-        setItems((prev) => finalizeOpenTools(prev, "cancelled"));
-        void window.grokDesktop.cancel();
+        if (mode === "now") {
+          sendNowRef.current = item;
+          setItems((prev) => finalizeOpenTools(prev, "cancelled"));
+          void window.grokDesktop.cancel();
+        }
         return true;
       }
 
@@ -315,6 +346,19 @@ export function usePromptDelivery(opts: {
     return item;
   }, [enqueuePrompt]);
 
+  /** Stop the live turn immediately — do not wait for the agent to finish. */
+  const stopTurn = useCallback(() => {
+    deliveryGenRef.current += 1;
+    afterTurnRef.current = null;
+    sendNowRef.current = null;
+    setPromptQueue([]);
+    promptQueueRef.current = [];
+    busyRef.current = false;
+    setItems((prev) => finalizeOpenTools(prev, "cancelled"));
+    setConn("online");
+    void window.grokDesktop.cancel().catch(() => {});
+  }, [busyRef, setConn, setItems]);
+
   const sendQueuedNow = useCallback(
     (id?: string) => {
       if (openingRef.current) return;
@@ -351,5 +395,8 @@ export function usePromptDelivery(opts: {
     submitFromComposer,
     queueNextPrompt,
     sendQueuedNow,
+    stopTurn,
+    moveQueued,
+    editQueued,
   };
 }

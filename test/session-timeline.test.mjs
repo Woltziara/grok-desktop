@@ -578,6 +578,30 @@ test("user image echo does not append [object Object] onto a second bubble", () 
   assert.doesNotMatch(users[0].text, /object Object/);
 });
 
+function assistantChunk(text) {
+  return {
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+    },
+  };
+}
+
+test("ordinary chunks concatenate even when they look like suffixes", () => {
+  let items = applySessionUpdate([], assistantChunk("100"));
+  items = applySessionUpdate(items, assistantChunk("0"));
+  assert.equal(items.at(-1).text, "1000");
+
+  items = applySessionUpdate([], assistantChunk("哈"));
+  items = applySessionUpdate(items, assistantChunk("哈"));
+  assert.equal(items.at(-1).text, "哈哈");
+
+  items = applySessionUpdate([], assistantChunk("one "));
+  items = applySessionUpdate(items, assistantChunk("two "));
+  items = applySessionUpdate(items, assistantChunk("two "));
+  assert.equal(items.at(-1).text, "one two two ");
+});
+
 test("appendWorkedIfNeeded does not duplicate", () => {
   const once = appendWorkedIfNeeded(
     [{ id: "u", kind: "user", text: "hi", at: 1_000 }],

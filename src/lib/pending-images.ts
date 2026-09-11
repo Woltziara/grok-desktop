@@ -181,22 +181,87 @@ export async function encodePendingImages(
 /** Decode a list of image blobs; returns successes + first error message. */
 export async function filesToPendingImages(
   files: ArrayLike<Blob | File>,
-): Promise<{ images: PendingImage[]; error: string | null }> {
+  existing: PendingImage[] = [],
+): Promise<{
+  images: PendingImage[];
+  error: string | null;
+  duplicates: string[];
+}> {
   const images: PendingImage[] = [];
+  const duplicates: string[] = [];
   let error: string | null = null;
+  const known = existing.map((img) => ({
+    path: (img as PendingImage & { path?: string }).path,
+    name: img.name,
+    size: img.source?.size || 0,
+  }));
   for (const file of Array.from(files)) {
-    try {
-      images.push(
-        await fileToPendingImage(
-          file,
-          file instanceof File ? file.name : undefined,
-        ),
+    const name = file instanceof File ? file.name : undefined;
+    const path =
+      file instanceof File && typeof (file as File & { path?: string }).path === "string"
+        ? (file as File & { path?: string }).path
+        : undefined;
+    const keyName = String(name || "").trim().toLowerCase();
+    const size = file.size || 0;
+    const dup = known.find((row) => {
+      if (path && row.path && path === row.path) return true;
+      return (
+        String(row.name || "").trim().toLowerCase() === keyName &&
+        Number(row.size) === size &&
+        size > 0
       );
+    });
+    if (dup) {
+      duplicates.push(name || dup.name || "图片");
+      continue;
+    }
+    try {
+      const img = await fileToPendingImage(file, name);
+      images.push(img);
+      known.push({
+        path,
+        name: img.name,
+        size: file.size || 0,
+      });
     } catch (e: unknown) {
       if (!error) {
         error = e instanceof Error ? e.message : String(e);
       }
     }
   }
-  return { images, error };
+  return { images, error, duplicates };
+}
+
+export function dataUrlToPendingImage(
+  dataUrl: string,
+  opts: { id?: string; name?: string; mimeType?: string } = {},
+): PendingImage | null {
+  const raw = String(dataUrl || "");
+  const m = raw.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  const mimeType = opts.mimeType || m[1] || "image/png";
+  const data = m[2];
+  if (!data) return null;
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mimeType });
+  return {
+    id: opts.id || uid("img"),
+    data,
+    mimeType,
+    previewUrl: raw,
+    name: opts.name,
+    source: blob,
+  };
+}
+
+export function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () =>
+      reject(reader.error || new Error("Failed to read image"));
+    reader.readAsDataURL(blob);
+  });
 }

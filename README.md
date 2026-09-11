@@ -1,57 +1,38 @@
 # Grok Desktop
 
-Desktop GUI for the [Grok Build](https://github.com/xai-org/grok-build) coding agent — chat, tools, approvals, Preview, and project sessions over ACP.
+给**不写代码的人**用的 Grok Build 桌面壳：打开就能说话，像聊天客厅，不像代码工作台。
 
-**License: MIT.** This tree is a fork of [liaan/grok-desktop](https://github.com/liaan/grok-desktop) with a living-room UI. See [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md) for copyright and third-party notices. It is **not** an official SpaceXAI / xAI product.
+底层仍是已安装的 `grok`（ACP）。本仓库只改人看见的那一层。
 
-**开源说明（中文）：** 本仓库按 MIT 发布。原作者 Karman de Lange 的版权必须保留；本叉的界面改动版权归 Oscar Woltz。借鉴了 MIT 的 grok-app 结构（在本仓库内重写，没有搬 Tauri 工程）和 GitHub Markdown CSS。Cherry Studio / opcode 是 AGPL，只看过原则，**没有拷代码**。Codex / Claude 只学行为。Grok Build 本体在 [xai-org/grok-build](https://github.com/xai-org/grok-build)，不在本仓库里。xAI / Grok 的公开开源阵地是 GitHub 组织 [`xai-org`](https://github.com/xai-org)；官方插件市场只收 Grok 插件，不收这个桌面 GUI。详细清单见 [`NOTICE.md`](NOTICE.md)。
+不是 SpaceXAI 官方产品。许可证 **MIT**，详见文末与 [`NOTICE.md`](NOTICE.md)。
 
-<p align="center">
+## 这套界面做成了什么样
 
-![Grok Desktop main window: chats, tool cards, Preview, and project files](docs/screenshots/main.png)
+打开窗口：中间一个名字、下面一个输入框，可以直接说这件事。左边是案子。右边默认关掉，只有要盯着看的一页才滑出来。
 
-</p>
+| 位置 | 人看见的 |
+|------|----------|
+| **左** | **项目**（每个文件夹一个项目，里面是这个项目的对话）和 **最近**。正在跑的对话右边有转动的小圆圈。切换对话不会取消正在进行的一轮。 |
+| **中** | 对话本身。你说的话靠右、深色圆角气泡；回复靠左、不装进气泡，标题/列表/引用/代码按正文排。纸色 `#FAF7F2`，墨色暖灰，唯一强调色青绿。正文用仓耳今楷（本机已装时），代码用 Hack。 |
+| **右** | 对话里写出来的页面和文稿；点 **Preview** 或 ⌘T 在这一栏打开网页，不再另开黑窗口。 |
+| **输入框** | 贴在中间底部。模型和权限藏在框内小标签。还剩约 25% 上下文时可点余量格子：先 Compact Prep 写胶囊，再压缩，再强制读 Catch up。你发消息时若它还在想，会马上插入，不排队。 |
 
-<p align="center">
+对话里还可以：改自己刚说的话（铅笔）、复制回复、从某条回复 **分支** 开一条新对话。工具过程收成安静的活动条，不拿大徽章当主角。
 
-![Sign-in welcome screen](docs/screenshots/welcome.png)
-&nbsp;
-![Tool permission approvals panel](docs/screenshots/approvals.png)
+意图锁定（给后续改界面的人）：[`docs/INTENT-LOCK.md`](docs/INTENT-LOCK.md)。
 
-</p>
+## 安装 / 保存这一版
 
-<p align="center">
+本叉目前提供 **Apple Silicon Mac** 的应用程序压缩包（GitHub Releases）。需要本机已安装 [Grok Build CLI](https://github.com/xai-org/grok-build)。
 
-![Detachable Preview window: address bar, viewport, Snapshot — drag to another screen](docs/screenshots/preview.png)
-&nbsp;
-![This folder is already open: switch window, reuse a Grok worktree, or create one](docs/screenshots/worktree.png)
+1. 打开 [Releases](https://github.com/Woltziara/grok-desktop/releases/latest)，下载 `GrokDesktop-*-Mac-AppleSilicon.zip`
+2. 解压，把 **Grok Desktop** 拖进「应用程序」
+3. 若系统说已损坏，在终端执行：`xattr -cr "/Applications/Grok Desktop.app"`，再从「应用程序」打开
+4. 应用内 **用浏览器登录**，再打开一个项目文件夹
 
-</p>
+从源码运行：`npm install && npm run dev`（Node 22+）。打安装包：`npm run pack`。
 
-<p align="center"><sub>Day theme · browser sign-in · tool approvals · detachable Preview · Grok worktrees</sub></p>
-
-## Install for the team (no npm)
-
-**Nobody needs Node or npm.** Open the latest
-[GitHub Release](https://github.com/Woltziara/grok-desktop/releases/latest)
-(upstream installers also exist at [liaan/grok-desktop](https://github.com/liaan/grok-desktop/releases/latest))
-and download **one** file:
-
-| You have… | File | What to do |
-|-----------|------|------------|
-| **Windows** | `…-Windows-Setup.exe` | Double-click → install |
-| **Mac (M1/M2/M3/M4)** | `…-Mac-AppleSilicon.dmg` | Open DMG → drag app to **Applications** → then see Mac note below |
-| **Mac (Intel)** | `…-Mac-Intel.dmg` | Same as above |
-| **Linux (x64)** | `…-Linux-x64.AppImage` | `chmod +x` then run |
-| **Source code** | GitHub **Source code (zip)** | Only if you want to build from source |
-
-**Team install:** use Setup.exe, a DMG, or the Linux AppImage. Files named `latest.yml`, `latest-mac.yml`, `latest-linux.yml`, Mac `.zip`, or blockmap are for **in-app auto-update** (not hand install).
-
-Also install the **Grok Build CLI** (`grok`) — this app is only the GUI.
-
-Then: **Grok Desktop** → **Sign in with browser** → **Open project…**
-
-**Updates:** in a packaged install, **Help → Check for updates…** checks GitHub Releases and downloads the next **stable** version in-app (restart when prompted). Testers who should try a prerelease: **Settings → Preview updates**, then Check for updates. Everyone else leave that off. You only need a fresh installer from Releases if auto-update metadata is missing for that build.
+Windows / Linux 安装包尚未由本叉打包；上游原版在 [liaan/grok-desktop](https://github.com/liaan/grok-desktop/releases)。
 
 ### Mac: “damaged and can’t be opened”
 

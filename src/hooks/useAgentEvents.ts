@@ -12,7 +12,19 @@ import {
   applyBackgroundUpdate,
   type BackgroundTask,
 } from "../lib/background-tasks";
+import { applyScheduledUpdate } from "../../shared/scheduled-tasks.mjs";
+import type { ScheduledLoop } from "../components/ScheduledLoopsBar";
 import { applySessionUpdate } from "../lib/timeline";
+import {
+  abortOpen,
+  applyBufferedUpdates,
+  beginOpen,
+  bindOpenSession,
+  createOpenGate,
+  drainOpenTimeline,
+  enqueueLiveUpdate,
+  finishOpen,
+} from "../../shared/open-timeline.mjs";
 import {
   applyUsageUpdate,
   emptyUsage,
@@ -68,7 +80,50 @@ export function useAgentEvents(opts: {
     setSettingsOpen,
   } = opts;
 
+  const openGateRef = useRef(createOpenGate());
+
+  const beginOpening = useCallback((sessionId?: string | null) => {
+    return beginOpen(openGateRef.current, sessionId || null);
+  }, []);
+
+  const bindOpeningSession = useCallback(
+    (sessionId?: string | null, afterSeq?: number | null) => {
+      bindOpenSession(openGateRef.current, sessionId || null, afterSeq);
+    },
+    [],
+  );
+
+  const abortOpening = useCallback((gen?: number) => {
+    abortOpen(openGateRef.current, gen);
+  }, []);
+
+  const finishOpening = useCallback(
+    (gen?: number) => {
+      const extra = finishOpen(openGateRef.current, gen);
+      if (!extra.length) return;
+      setItems((prev) =>
+        applyBufferedUpdates(prev, extra, openGateRef.current),
+      );
+      for (const ev of extra) {
+        const update = ev?.update ?? ev;
+        const kind = update?.sessionUpdate || update?.session_update;
+        if (
+          kind === "turn_completed" ||
+          kind === "turn_complete" ||
+          kind === "auto_compact_completed" ||
+          kind === "compact_completed" ||
+          ev?._meta?.totalTokens != null ||
+          update?.totalTokens != null
+        ) {
+          setSessionUsage((prev) => applyUsageUpdate(prev, ev));
+        }
+      }
+    },
+    [setItems],
+  );
+
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledLoop[]>([]);
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>(
     [],
   );
@@ -85,6 +140,36 @@ export function useAgentEvents(opts: {
   const [sessionUsage, setSessionUsage] = useState<SessionUsage>(emptyUsage);
   const [allowWritesThisSession, setAllowWritesThisSession] =
     useState(false);
+
+  const applyOpenTimeline = useCallback(
+    (banner: TimelineItem, history: TimelineItem[], gen?: number) => {
+      const gate = openGateRef.current;
+      const committed = drainOpenTimeline(gate, {
+        banner,
+        history,
+        gen,
+      });
+      if (!committed) return [];
+      const items = committed.items;
+      setItems(items);
+      for (const ev of committed.events) {
+        const update = ev?.update ?? ev;
+        const kind = update?.sessionUpdate || update?.session_update;
+        if (
+          kind === "turn_completed" ||
+          kind === "turn_complete" ||
+          kind === "auto_compact_completed" ||
+          kind === "compact_completed" ||
+          ev?._meta?.totalTokens != null ||
+          update?.totalTokens != null
+        ) {
+          setSessionUsage((prev) => applyUsageUpdate(prev, ev));
+        }
+      }
+      return items;
+    },
+    [setItems],
+  );
 
   /**
    * Bumped on every live permission push so an in-flight list→replace
@@ -163,6 +248,16 @@ export function useAgentEvents(opts: {
             return next === prev ? prev : next;
           });
         }
+        if (
+          kind === "scheduled_task_created" ||
+          kind === "scheduled_task_fired" ||
+          kind === "scheduled_task_deleted"
+        ) {
+          setScheduledTasks((prev) => {
+            const next = applyScheduledUpdate(prev, params);
+            return next === prev ? prev : next;
+          });
+        }
         // Ordered pipeline: ignore live usage while project/session is opening;
         // disk hydrate (replace) runs in applyOpenResult, then live accumulates.
         if (
@@ -177,6 +272,10 @@ export function useAgentEvents(opts: {
           setSessionUsage((prev) => applyUsageUpdate(prev, params));
         }
         if (kind !== "available_commands_update") {
+          const decision = enqueueLiveUpdate(openGateRef.current, params);
+          if (decision === "stale" || decision === "buffer") {
+            return;
+          }
           setItems((prev) => applySessionUpdate(prev, params));
         }
       }),
@@ -394,6 +493,7 @@ export function useAgentEvents(opts: {
   const clearSessionScoped = useCallback(() => {
     setPermissions([]);
     setBackgroundTasks([]);
+    setScheduledTasks([]);
     setSessionUsage(emptyUsage());
     setSessionMode(null);
     setPlanApproval(null);
@@ -416,6 +516,15 @@ export function useAgentEvents(opts: {
   /** Restore Tasks dock from session disk / open result. */
   const hydrateBackgroundTasks = useCallback((tasks: BackgroundTask[]) => {
     setBackgroundTasks(Array.isArray(tasks) ? tasks : []);
+  }, []);
+
+  const hydrateScheduledTasks = useCallback((tasks: ScheduledLoop[]) => {
+    setScheduledTasks(Array.isArray(tasks) ? tasks : []);
+  }, []);
+
+  const dropScheduledTask = useCallback((taskId: string) => {
+    const id = String(taskId || "");
+    setScheduledTasks((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   /**
@@ -684,6 +793,7 @@ export function useAgentEvents(opts: {
   return {
     permissions,
     backgroundTasks,
+    scheduledTasks,
     sessionUsage,
     sessionMode,
     planApproval,
@@ -693,6 +803,8 @@ export function useAgentEvents(opts: {
     clearSessionScoped,
     revokeWritesThisSession,
     hydrateBackgroundTasks,
+    hydrateScheduledTasks,
+    dropScheduledTask,
     hydrateSessionUsage,
     syncPermissionsFromMain,
     onPermission,
@@ -704,5 +816,10 @@ export function useAgentEvents(opts: {
     onUserQuestion,
     onFolderTrust,
     onMcpElicit,
+    beginOpening,
+    bindOpeningSession,
+    abortOpening,
+    finishOpening,
+    applyOpenTimeline,
   };
 }

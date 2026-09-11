@@ -4,6 +4,8 @@ import { CodingDataPage } from "./settings/CodingDataPage";
 import { DiagnosticsPage } from "./settings/DiagnosticsPage";
 import { EnginePage } from "./settings/EnginePage";
 import { GeneralPage } from "./settings/GeneralPage";
+import { MemoryPage } from "./settings/MemoryPage";
+import { PeerSyncPage } from "./settings/PeerSyncPage";
 import { McpPage } from "./settings/McpPage";
 import { PluginsPage } from "./settings/PluginsPage";
 import { SafetyPage } from "./settings/SafetyPage";
@@ -253,6 +255,23 @@ function SettingsPageBody({
           onSetPermissionMode={props.onSetPermissionMode}
           onSetSandboxTerminal={props.onSetSandboxTerminal}
           onToggleAllowOutside={props.onToggleAllowOutside}
+        />
+      );
+    case "memory":
+      return (
+        <MemoryPage
+          open
+          offerRestart={props.offerRestart}
+          restarting={props.restarting}
+          onRestartAgent={props.onRestartAgent}
+        />
+      );
+    case "peer":
+      return (
+        <PeerSyncPage
+          open
+          restarting={props.restarting}
+          onRestartAgent={props.onRestartAgent}
         />
       );
     case "coding-data":

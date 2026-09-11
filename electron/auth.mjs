@@ -371,6 +371,8 @@ export async function hitLoopbackCallback(url) {
 
 /**
  * Run `grok logout` to clear ~/.grok/auth.json session.
+ * Must not wipe sessions, sidebar recents, MCP credentials, or host
+ * tool logins (GitHub, mail). Those belong to the person on this machine.
  */
 export function startLogout() {
   cancelLogin();

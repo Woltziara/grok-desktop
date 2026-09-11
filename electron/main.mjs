@@ -6,6 +6,7 @@ import {
   dialog,
   shell,
   Menu,
+  Notification,
 } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,6 +49,11 @@ import {
   setAllowPrerelease,
 } from "./auto-update.mjs";
 import {
+  asarPathFromExec,
+  bundlePathFromExec,
+  isPackNewerThanLaunch,
+} from "../shared/stale-bundle.mjs";
+import {
   listSessionsForCwd,
   listSessionsForCwds,
   loadSessionOpenState,
@@ -57,6 +63,10 @@ import {
   sanitizeSessionTitle,
   MAX_SESSION_TITLE_LENGTH,
 } from "./sessions.mjs";
+import {
+  ATTACH_DIALOG_FILTERS,
+  importAttachmentFile,
+} from "./attachments.mjs";
 import {
   listPendingPermissionRequests,
   setOnEnableAlwaysApprove,
@@ -68,6 +78,29 @@ import {
   getCodingDataStatus,
   setCodingDataOptIn,
 } from "./coding-data.mjs";
+import {
+  deleteMemoryEntry,
+  getMemoryEnabled,
+  listMemoryEntries,
+  setMemoryEnabled,
+} from "./memory.mjs";
+import {
+  activateAccount,
+  listAccountSnapshots,
+  saveCurrentSnapshot,
+} from "./account-auth.mjs";
+import {
+  alignPeer,
+  copyAuthToPeer,
+  pairPeer,
+  peerAccountSummary,
+  peerStatus,
+} from "./peer-sync.mjs";
+import { remainingFromBilling } from "../shared/billing-display.mjs";
+import {
+  exportFilename,
+  timelineToMarkdown,
+} from "../shared/export-transcript.mjs";
 import { assertPathInProject, isPathInProject } from "./path-safety.mjs";
 import { readFileForEdit, writeFileForEdit } from "./fs-content.mjs";
 import {
@@ -92,6 +125,8 @@ import {
   restartAgentOnWindow,
   send,
   sessionFromEvent,
+  agentForSession,
+  anyAgent,
   setDesktopStateLoader,
   setWindowChromeListener,
   windowSessions,
@@ -154,6 +189,50 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
+const launchedAt = Date.now();
+let launchedBundleMtime = 0;
+let launchedAsarMtime = 0;
+try {
+  launchedBundleMtime = fs.statSync(
+    bundlePathFromExec(process.execPath, process.platform),
+  ).mtimeMs;
+} catch {
+  launchedBundleMtime = 0;
+}
+try {
+  const asar = asarPathFromExec(process.execPath, process.platform);
+  if (asar) launchedAsarMtime = fs.statSync(asar).mtimeMs;
+} catch {
+  launchedAsarMtime = 0;
+}
+
+function currentMtimes() {
+  const bundle = bundlePathFromExec(process.execPath, process.platform);
+  const asar = asarPathFromExec(process.execPath, process.platform);
+  const now = [];
+  const then = [];
+  try {
+    now.push(fs.statSync(bundle).mtimeMs);
+    then.push(launchedBundleMtime);
+  } catch {
+    /* ignore */
+  }
+  if (asar) {
+    try {
+      now.push(fs.statSync(asar).mtimeMs);
+      then.push(launchedAsarMtime);
+    } catch {
+      /* ignore */
+    }
+  }
+  return { now, then };
+}
+
+function currentBundleStale() {
+  if (isDev) return false;
+  const { now, then } = currentMtimes();
+  return isPackNewerThanLaunch(now, then);
+}
 
 /** File → Quit / Cmd+Q. Window X does not set this (Settings can swallow that). */
 let appQuitting = false;
@@ -206,6 +285,7 @@ function loadState() {
        * off | 64k | 128k | 192k
        */
       autoCompactAt: "off",
+      lastPeerSyncAt: null,
       lastProject: null,
       ...raw,
     };
@@ -235,6 +315,7 @@ function loadState() {
       allowPrerelease: false,
       externalEditor: "auto",
       autoCompactAt: "off",
+      lastPeerSyncAt: null,
       lastProject: null,
       recentProjects: [],
     };
@@ -474,6 +555,15 @@ function installApplicationMenu() {
         { role: "pasteAndMatchStyle" },
         { role: "delete" },
         { role: "selectAll" },
+        { type: "separator" },
+        {
+          label: "Find…",
+          accelerator: "CmdOrCtrl+F",
+          click: () => {
+            const ws = focusedSession();
+            if (ws) send(ws, "app:find");
+          },
+        },
       ],
     },
     {
@@ -753,9 +843,14 @@ function registerIpc() {
       allowPrerelease: Boolean(state.allowPrerelease),
       externalEditor: normalizeExternalEditor(state.externalEditor),
       autoCompactAt: normalizeAutoCompactAt(state.autoCompactAt),
+      lastPeerSyncAt: state.lastPeerSyncAt || null,
+      memoryEnabled: getMemoryEnabled(),
       recentProjects: state.recentProjects || [],
       lastProject: state.lastProject,
       home: os.homedir(),
+      packaged: app.isPackaged,
+      launchedAt,
+      bundleStale: currentBundleStale(),
       auth,
       previewApi: Boolean(previewApiAddress()),
       contextWindows: readModelContextWindows(),
@@ -1545,6 +1640,130 @@ function registerIpc() {
     return setCodingDataOptIn(Boolean(value));
   });
 
+  ipcMain.handle("memory:status", async (e) => {
+    const ws = sessionFromEvent(e);
+    const cwd = ws?.agent?.cwd || ws?.lastCwd || null;
+    return listMemoryEntries(cwd);
+  });
+
+  ipcMain.handle("memory:set-enabled", async (_e, value) => {
+    return { enabled: setMemoryEnabled(Boolean(value)) };
+  });
+
+  ipcMain.handle("memory:delete", async (_e, entryId) => {
+    return deleteMemoryEntry(String(entryId || ""));
+  });
+
+  ipcMain.handle("peer:status", async () => {
+    const state = loadState();
+    const status = await peerStatus(app.getPath("userData"));
+    return { ...status, lastSyncAt: state.lastPeerSyncAt || null };
+  });
+
+  ipcMain.handle("peer:pair", async (_e, password) => {
+    return pairPeer(app.getPath("userData"), String(password || ""));
+  });
+
+  ipcMain.handle("peer:align", async (_e, opts = {}) => {
+    const result = await alignPeer(app.getPath("userData"), {
+      apply: Boolean(opts.apply),
+    });
+    if (result.ok && result.applied) {
+      const state = loadState();
+      state.lastPeerSyncAt = new Date().toISOString();
+      saveState(state);
+      result.lastSyncAt = state.lastPeerSyncAt;
+    }
+    return result;
+  });
+
+  function broadcastAuthChanged() {
+    const status = getAuthStatus();
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try {
+        win.webContents.send("auth:changed", status);
+      } catch {
+        /* ignore */
+      }
+    }
+    return status;
+  }
+
+  ipcMain.handle("account:list", async () => {
+    saveCurrentSnapshot();
+    const local = listAccountSnapshots();
+    const peer = await peerAccountSummary(app.getPath("userData"));
+    return { ...local, peer };
+  });
+
+  ipcMain.handle("account:activate", async (_e, id) => {
+    const result = activateAccount(String(id || ""));
+    if (result.ok) {
+      result.status = broadcastAuthChanged();
+    }
+    return result;
+  });
+
+  ipcMain.handle("peer:copy-auth", async (_e, direction) => {
+    const dir = direction === "pull" ? "pull" : "push";
+    const result = await copyAuthToPeer(app.getPath("userData"), dir);
+    if (result.ok && dir === "pull") {
+      result.status = broadcastAuthChanged();
+    }
+    return result;
+  });
+
+  ipcMain.handle("agent:billing", async (e) => {
+    const ws = sessionFromEvent(e);
+    const agent = anyAgent(ws);
+    if (!agent?.ready) {
+      return { ok: false, line: "打开一个项目后可以看到额度" };
+    }
+    try {
+      const raw = await agent.fetchBilling();
+      return { ok: true, ...remainingFromBilling(raw) };
+    } catch (err) {
+      return {
+        ok: false,
+        line: "暂时查不到额度",
+        error: err?.message || String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("agent:scheduler-delete", async (e, opts = {}) => {
+    const ws = sessionFromEvent(e);
+    const sid = String(opts.sessionId || ws?.agent?.sessionId || "");
+    const agent = agentForSession(ws, sid);
+    if (!agent?.ready) throw new Error("Agent not connected. Open a project first.");
+    try {
+      return await agent.deleteScheduledTask(opts.taskId, sid);
+    } catch (err) {
+      throw new Error(err?.message || String(err));
+    }
+  });
+
+  ipcMain.handle("chat:export", async (e, opts = {}) => {
+    const ws = sessionFromEvent(e);
+    const win = ws?.win && !ws.win.isDestroyed() ? ws.win : undefined;
+    const title = String(opts.title || "对话");
+    const markdown = timelineToMarkdown(opts.items || [], {
+      title,
+      project: opts.project || ws?.agent?.cwd || ws?.lastCwd || "",
+    });
+    const picked = await dialog.showSaveDialog(win, {
+      title: "导出这场对话",
+      defaultPath: exportFilename(title),
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (picked.canceled || !picked.filePath) {
+      return { ok: false, cancelled: true };
+    }
+    fs.writeFileSync(picked.filePath, markdown, "utf8");
+    return { ok: true, path: picked.filePath };
+  });
+
   ipcMain.handle("app:set-allow-prerelease", async (_e, value) => {
     const state = loadState();
     state.allowPrerelease = Boolean(value);
@@ -1639,6 +1858,52 @@ function registerIpc() {
     const safe = assertPathInProject(root, filePath);
     await writeFileForEdit(safe, content);
     return { ok: true };
+  });
+
+  ipcMain.handle("fs:pick-files", async (e) => {
+    const ws = sessionFromEvent(e);
+    const parent =
+      ws?.win && !ws.win.isDestroyed()
+        ? ws.win
+        : BrowserWindow.getFocusedWindow() || undefined;
+    const result = await dialog.showOpenDialog(parent, {
+      properties: ["openFile", "multiSelections"],
+      defaultPath: ws?.agent?.cwd || undefined,
+      title: "附上文件",
+      filters: ATTACH_DIALOG_FILTERS,
+    });
+    if (result.canceled || !result.filePaths?.length) return [];
+    return result.filePaths;
+  });
+
+  ipcMain.handle("attachments:import", async (e, sourcePath) => {
+    const ws = sessionFromEvent(e);
+    return importAttachmentFile(sourcePath, {
+      cwd: ws?.agent?.cwd,
+      sessionId: ws?.agent?.sessionId,
+    });
+  });
+
+  ipcMain.handle("agent:ping", async (e) => {
+    const ws = sessionFromEvent(e);
+    const agent = ws?.agent;
+    const proc = agent?.proc;
+    const alive = Boolean(proc && !proc.killed && proc.exitCode == null);
+    if (!alive || typeof agent?.ping !== "function") {
+      return {
+        ok: false,
+        rpc: false,
+        reason: alive ? "no-rpc" : "process",
+        sessionId: agent?.sessionId || null,
+        cwd: agent?.cwd || null,
+      };
+    }
+    const rpc = await agent.ping(4000);
+    return {
+      ...rpc,
+      sessionId: agent.sessionId || null,
+      cwd: agent.cwd || null,
+    };
   });
 
   ipcMain.handle("fs:pick-file", async (e) => {
@@ -1781,6 +2046,46 @@ function registerIpc() {
     }
     await shell.openExternal(url);
     return true;
+  });
+
+  ipcMain.handle("app:notify", (e, payload = {}) => {
+    const title = String(payload.title || "Grok Desktop");
+    const body = String(payload.body || "");
+    if (!Notification.isSupported()) return { ok: false };
+    const n = new Notification({ title, body, silent: false });
+    n.on("click", () => {
+      const ws = sessionFromEvent(e);
+      if (ws?.win && !ws.win.isDestroyed()) {
+        if (ws.win.isMinimized()) ws.win.restore();
+        ws.win.show();
+        ws.win.focus();
+        send(ws, "app:notify-click", {
+          sessionId: payload.sessionId || null,
+          cwd: payload.cwd || null,
+        });
+      }
+    });
+    n.show();
+    return { ok: true };
+  });
+
+  ipcMain.handle("app:bundle-stale", async () => ({
+    stale: currentBundleStale(),
+    packaged: app.isPackaged,
+  }));
+
+  ipcMain.handle("app:relaunch", () => {
+    app.relaunch();
+    app.exit(0);
+  });
+
+  ipcMain.handle("shell:open-default", async (e, target) => {
+    const root = sessionFromEvent(e)?.agent?.cwd;
+    if (!root) throw new Error("No project open");
+    const safe = assertPathInProject(root, target);
+    const err = await shell.openPath(safe);
+    if (err) throw new Error(err);
+    return { ok: true };
   });
 
   ipcMain.handle("clipboard:write", (_e, payload = {}) => {

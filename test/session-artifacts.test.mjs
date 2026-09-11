@@ -14,7 +14,9 @@ test("html and images are tryable; source files are listed but not auto-tried", 
   assert.equal(artifactKindFromPath("deck/index.html"), "html");
   assert.equal(artifactKindFromPath("shot.png"), "image");
   assert.equal(artifactKindFromPath("note.md"), "markdown");
+  assert.equal(artifactKindFromPath("brief.pdf"), "pdf");
   assert.equal(isTryableArtifact("html"), true);
+  assert.equal(isTryableArtifact("pdf"), true);
   assert.equal(isTryableArtifact("text"), false);
 });
 

@@ -23,6 +23,54 @@ declare module "../../shared/session-timeline.mjs" {
   ): string;
 }
 
+declare module "../../shared/open-timeline.mjs" {
+  export function createOpenGate(): {
+    opening: boolean;
+    gen: number;
+    buffer: any[];
+    sessionId: string | null;
+    afterSeq: number | null;
+  };
+  export function eventSessionId(params: any): string;
+  export function eventDesktopSeq(params: any): number | null;
+  export function filterLiveEvents(
+    events: any[],
+    opts?: { sessionId?: string | null; afterSeq?: number | null },
+  ): any[];
+  export function beginOpen(gate: any, sessionId?: string | null): number;
+  export function bindOpenSession(
+    gate: any,
+    sessionId?: string | null,
+    afterSeq?: number | null,
+  ): void;
+  export function enqueueLiveUpdate(
+    gate: any,
+    params: any,
+  ): "apply" | "buffer" | "stale";
+  export function abortOpen(gate: any, gen?: number): void;
+  export function applyBufferedUpdates(
+    items: any[],
+    events: any[],
+    gateOrOpts?: { sessionId?: string | null; afterSeq?: number | null },
+  ): any[];
+  export function replayLiveOntoHistory(
+    banner: any,
+    history: any[],
+    liveEvents: any[],
+    sessionId?: string | null,
+    afterSeq?: number | null,
+  ): any[];
+  export function drainOpenTimeline(
+    gate: any,
+    opts?: { banner?: any; history?: any[]; gen?: number },
+  ): { items: any[]; events: any[]; sessionId: string | null; gen: number } | null;
+  export function finishOpen(gate: any, gen?: number): any[];
+  export function commitOpenTimeline(
+    gate: any,
+    opts?: { banner?: any; history?: any[]; gen?: number },
+  ): { items: any[]; events: any[]; sessionId: string | null; gen: number } | null;
+}
+
 declare module "../../shared/usage.mjs" {
   export type SessionUsage = {
     turns: number;
@@ -130,6 +178,14 @@ export type AuthStatus = {
   expired: boolean;
   hasApiKey: boolean;
   loginInProgress: boolean;
+};
+
+export type AccountRow = {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+  expired?: boolean;
+  active?: boolean;
 };
 
 export type GrokEngineInfo = {
@@ -374,6 +430,8 @@ export type OpenProjectResult = {
   /** Models advertised on session/new|load — empty when the agent omits them */
   availableModels?: AvailableModel[];
   history?: TimelineItem[];
+  /** Agent update seq at history snapshot; replay only later events. */
+  historySeq?: number;
   /** Background commands/subagents restored from updates.jsonl */
   backgroundTasks?: Array<{
     id: string;
@@ -388,6 +446,13 @@ export type OpenProjectResult = {
     endedAt?: number;
     outputSnippet?: string;
     toolCallId?: string;
+  }>;
+  /** Active `/loop` tasks restored from updates.jsonl */
+  scheduledTasks?: Array<{
+    id: string;
+    prompt: string;
+    schedule: string;
+    nextFireAt?: string | null;
   }>;
   /** Summed turn_completed usage from updates.jsonl (status bar) */
   usage?: import("./lib/usage").SessionUsage | null;
@@ -439,6 +504,8 @@ export type AppInfo = {
     managed: boolean;
     note?: string;
   };
+  /** ~/.grok/config.toml [memory] enabled */
+  memoryEnabled?: boolean;
   /** Diagnostic JSONL log for tools/hooks/terminals */
   debugLogging: boolean;
   debugLogPath: string;
@@ -458,6 +525,9 @@ export type AppInfo = {
   recentProjects: string[];
   lastProject: string | null;
   home: string;
+  packaged?: boolean;
+  launchedAt?: number;
+  bundleStale?: boolean;
   auth: AuthStatus;
 };
 
@@ -634,6 +704,97 @@ declare global {
         managed: boolean;
         note?: string;
       }>;
+      getMemoryStatus: () => Promise<{
+        enabled: boolean;
+        entries: Array<{
+          id: string;
+          file: string;
+          scope: string;
+          heading: string;
+          text: string;
+          wholeFile?: boolean;
+          label: string;
+        }>;
+      }>;
+      setMemoryEnabled: (value: boolean) => Promise<{ enabled: boolean }>;
+      deleteMemoryEntry: (entryId: string) => Promise<{ ok: boolean }>;
+      getBilling: () => Promise<{
+        ok: boolean;
+        line: string;
+        remainingPct?: number | null;
+        usedPct?: number | null;
+        error?: string;
+      }>;
+      deleteScheduledTask: (opts: {
+        taskId: string;
+        sessionId?: string;
+      }) => Promise<unknown>;
+      exportChat: (opts: {
+        items: TimelineItem[];
+        title?: string;
+        project?: string;
+      }) => Promise<{ ok: boolean; cancelled?: boolean; path?: string }>;
+      peerStatus: () => Promise<{
+        role: string;
+        label: string;
+        host: string;
+        online: boolean;
+        paired: boolean;
+        sshReady: boolean;
+        projectsPath: string;
+        grokHome: string;
+        lastSyncAt?: string | null;
+      }>;
+      peerPair: (
+        password: string,
+      ) => Promise<{ ok: boolean; error?: string; host?: string }>;
+      peerAlign: (opts?: { apply?: boolean }) => Promise<{
+        ok: boolean;
+        applied?: boolean;
+        needPair?: boolean;
+        error?: string;
+        preview?: string;
+        grok?: {
+          pull: { count: number; shown: string[]; more: number };
+          push: { count: number; shown: string[]; more: number };
+        };
+        projects?: {
+          pull: { count: number; shown: string[]; more: number };
+          push: { count: number; shown: string[]; more: number };
+        };
+      }>;
+      listAccounts: () => Promise<{
+        current: AccountRow | null;
+        saved: AccountRow[];
+        peer?: {
+          ok?: boolean;
+          online?: boolean;
+          sshReady?: boolean;
+          needPair?: boolean;
+          account?: AccountRow | null;
+          label?: string;
+        };
+      }>;
+      activateAccount: (id: string) => Promise<{
+        ok: boolean;
+        error?: string;
+        needsRestart?: boolean;
+        current?: AccountRow | null;
+        saved?: AccountRow[];
+        status?: AuthStatus;
+      }>;
+      copyAuthToPeer: (direction?: "push" | "pull") => Promise<{
+        ok: boolean;
+        error?: string;
+        needPair?: boolean;
+        needsRestart?: boolean;
+        direction?: "push" | "pull";
+        label?: string;
+        preview?: string;
+        local?: AccountRow | null;
+        peer?: AccountRow | null;
+        status?: AuthStatus;
+      }>;
       setAllowPrerelease: (value: boolean) => Promise<boolean>;
       setDebugLogging: (
         value: boolean,
@@ -665,6 +826,25 @@ declare global {
       setExternalEditor: (id: string) => Promise<EditorListResult>;
       showItem: (path: string) => Promise<void>;
       pickFile: () => Promise<string | null>;
+      pickFiles?: () => Promise<string[]>;
+      importAttachment?: (path: string) => Promise<{
+        kind: string;
+        name: string;
+        path: string;
+        size: number;
+        mimeType: string;
+        text?: string;
+        data?: string;
+        staged?: boolean;
+      }>;
+      pingAgent?: () => Promise<{
+        ok: boolean;
+        rpc?: boolean;
+        reason?: string;
+        message?: string;
+        sessionId?: string | null;
+        cwd?: string | null;
+      }>;
       artifactPreview: (
         path: string,
       ) => Promise<{ origin: string; href: string }>;
@@ -738,9 +918,22 @@ declare global {
         text: string;
         html?: string;
       }) => Promise<boolean>;
+      notify?: (payload: {
+        title?: string;
+        body?: string;
+        sessionId?: string | null;
+        cwd?: string | null;
+      }) => Promise<{ ok: boolean }>;
+      bundleStale?: () => Promise<{ stale: boolean; packaged: boolean }>;
+      relaunchApp?: () => Promise<void>;
+      openDefault?: (path: string) => Promise<{ ok: boolean }>;
       on: (channel: string, handler: (payload: any) => void) => () => void;
     };
     __grokCopySelectionMarkdown?: () => void;
+  }
+
+  interface File {
+    readonly path?: string;
   }
 }
 

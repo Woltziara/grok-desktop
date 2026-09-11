@@ -110,6 +110,42 @@ export function compactConversationAttempts(sessionId, hint = "") {
 }
 
 /**
+ * Account credits snapshot (TUI `/usage`).
+ * @returns {{ method: string, params: object }[]}
+ */
+export function billingAttempts() {
+  return [
+    { method: "_x.ai/billing", params: {} },
+    { method: "x.ai/billing", params: {} },
+  ];
+}
+
+/**
+ * Cancel a `/loop` task on this session.
+ * @param {string} sessionId
+ * @param {string} taskId
+ */
+export function schedulerDeleteRequestParams(sessionId, taskId) {
+  return {
+    sessionId: String(sessionId || "").trim(),
+    taskId: String(taskId || "").trim(),
+  };
+}
+
+/**
+ * @param {string} sessionId
+ * @param {string} taskId
+ * @returns {{ method: string, params: object }[]}
+ */
+export function schedulerDeleteAttempts(sessionId, taskId) {
+  const params = schedulerDeleteRequestParams(sessionId, taskId);
+  return [
+    { method: "_x.ai/scheduler/delete", params },
+    { method: "x.ai/scheduler/delete", params },
+  ];
+}
+
+/**
  * ACP `session/fork` (also advertised as `x.ai/session/fork`).
  * @param {{ sessionId: string, cwd: string, mcpServers?: unknown[] }} opts
  */

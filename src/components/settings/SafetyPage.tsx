@@ -51,9 +51,10 @@ export function SafetyPage({
         <div className="settings-row-text">
           <span className="settings-label">Sandbox terminal</span>
           <span className="settings-desc">
-            When on (recommended), tool shells run in a project filesystem jail.
-            Host secrets and the Docker daemon stay out of reach; network still
-            works. Backend: {sandboxStatus || "…"}.
+            打开时（推荐），工具命令关在当前项目里，家里别的文件进不去。
+            要在系统「终端」里打开 .command 文稿时，由 Grok Desktop
+            自己打开，不走沙箱——否则系统会提示不允许 Sandbox
+            打开。Backend: {sandboxStatus || "…"}.
           </span>
         </div>
         <input

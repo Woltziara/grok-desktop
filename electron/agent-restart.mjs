@@ -94,6 +94,7 @@ export function mergeRestartResult(session, backbone) {
     modelName: session.modelName ?? null,
     history: session.history || [],
     backgroundTasks: session.backgroundTasks || [],
+    scheduledTasks: session.scheduledTasks || [],
     usage: session.usage ?? null,
     sessions: session.sessions || [],
     warning: session.warning ?? null,

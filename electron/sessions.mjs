@@ -1,6 +1,10 @@
 /**
  * Read Grok CLI session store under ~/.grok/sessions (same as TUI /resume).
  * History is rebuilt from updates.jsonl; agent context is restored via ACP session/load.
+ *
+ * Workspace identity: this catalog is the person's home on this machine.
+ * Do not filter or shard by Grok account (user_id / email). Switching
+ * xAI login must leave the same project/recent sidebar.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -11,6 +15,7 @@ import {
   isBackgroundTaskUpdateKind,
 } from "../shared/background-tasks.mjs";
 import { applyUsageUpdate, emptyUsage } from "../shared/usage.mjs";
+import { applyScheduledUpdate } from "../shared/scheduled-tasks.mjs";
 
 /** URL-encode cwd the same way the CLI groups sessions. */
 export function encodeSessionCwd(cwd) {
@@ -417,13 +422,14 @@ function updatesJsonlPath(cwd, sessionId) {
  * @param {{ maxItems?: number, maxTasks?: number }} [opts]
  */
 export function loadSessionOpenState(cwd, sessionId, opts = {}) {
-  const maxItems = opts.maxItems ?? 400;
+  const maxItems = opts.maxItems ?? 1200;
   const maxTasks = opts.maxTasks ?? 40;
   const updatesPath = updatesJsonlPath(cwd, sessionId);
   if (!fs.existsSync(updatesPath)) {
     return {
       items: [],
       tasks: [],
+      scheduledTasks: [],
       usage: emptyUsage(),
       error: null,
       path: updatesPath,
@@ -433,6 +439,8 @@ export function loadSessionOpenState(cwd, sessionId, opts = {}) {
   let items = [];
   /** @type {any[]} */
   let tasks = [];
+  /** @type {any[]} */
+  let scheduledTasks = [];
   let usage = emptyUsage();
   try {
     const text = fs.readFileSync(updatesPath, "utf8");
@@ -456,11 +464,13 @@ export function loadSessionOpenState(cwd, sessionId, opts = {}) {
       if (isBackgroundTaskUpdateKind(kind)) {
         tasks = applyBackgroundUpdate(tasks, params);
       }
+      scheduledTasks = applyScheduledUpdate(scheduledTasks, params);
     }
   } catch (err) {
     return {
       items: [],
       tasks: [],
+      scheduledTasks: [],
       usage: emptyUsage(),
       error: err?.message || String(err),
       path: updatesPath,
@@ -474,7 +484,7 @@ export function loadSessionOpenState(cwd, sessionId, opts = {}) {
     tasks = tasks.slice(0, maxTasks);
   }
 
-  return { items, tasks, usage, error: null, path: updatesPath };
+  return { items, tasks, scheduledTasks, usage, error: null, path: updatesPath };
 }
 
 /** @deprecated use loadSessionOpenState — kept as thin projection for call sites */
