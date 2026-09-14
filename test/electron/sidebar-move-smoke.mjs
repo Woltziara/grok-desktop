@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'desktop-sidebar-smoke-'));
+fs.mkdirSync(path.join(tmp,'profile'),{recursive:true});
 app.setPath('userData',path.join(tmp,'profile'));
 const {enablePreviewRemoteDebugging}=await import('../../electron/preview-cdp.mjs');enablePreviewRemoteDebugging();
 app.whenReady().then(async()=>{
