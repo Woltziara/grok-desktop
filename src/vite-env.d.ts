@@ -529,11 +529,6 @@ declare global {
       acceptContinuation: (input:{token:string;expected:string;choice:'incoming'|'keep-local';localFlow:import('./lib/continuation-flow').CarriedFlow}) => Promise<{ok:boolean;changed:boolean;cwd?:string;sessionId?:string;backup?:string;flow?:import('./lib/continuation-flow').CarriedFlow}>;
       rollbackContinuation: (token:string) => Promise<{ok:boolean;cwd:string;sessionId:string;backup:string}>;
       exportApplicationCandidate: () => Promise<{ok?:boolean;cancelled?:boolean;path?:string}>;
-      listWebProAssignments: () => Promise<WebProAssignment[]>;
-      createWebProAssignment: (input:{task:string;cwd:string;title?:string}) => Promise<WebProAssignment>;
-      readWebProAssignment: (id:string) => Promise<WebProAssignment>;
-      recordWebProSnapshot: (input:{id:string;text:string}) => Promise<WebProAssignment>;
-      recordWebProResult: (input:{id:string;files?:Array<{path:string;content:string}>;note?:string;apply?:boolean}) => Promise<WebProAssignment>;
       getInfo: () => Promise<AppInfo>;
       pickProject: () => Promise<string | null>;
       addRecentProject?: (
@@ -983,4 +978,3 @@ export type DeliveryEvent = {type: string; sessionId: string; cwd?: string; stat
 export type WorkingKnowledgeTransferPlan = {token:string;objectId:string;title:string;localTitle:string|null;sourceMachine:string;kind:'new'|'equal'|'local-ahead'|'incoming-ahead'|'conflict';localHead:string|null;incomingHead:string;changes:Array<{id:string;local:WorkingKnowledgeItem|null;incoming:WorkingKnowledgeItem|null}>;localPending:number;incomingPending:number;exportedAt:string};
 
 export type ContinuationPlan={token:string;cwd:string;sessionId:string;title:string;sourceCwd:string;nativeFiles:number;materialFiles:string[];nativeConflict:boolean;conflicts:string[];hasDraft:boolean;pendingSends:number;expected:string;version:unknown};
-export type WebProAssignment={format:string;id:string;title:string;task:string;prompt:string;cwd:string;url:string;status:string;createdAt:string;snapshots:Array<{at:string;bytes:number;excerpt:string}>;files:Array<{path:string;bytes:number}>;error:string|null;note?:string;finishedAt?:string};

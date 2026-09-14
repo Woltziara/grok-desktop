@@ -108,7 +108,6 @@ import {
 import { exportApplicationCandidate } from "./peer-sync.mjs";
 import { readBuildIdentity } from "./build-identity.mjs";
 import { registerContinuationIpc } from "./continuation-ipc.mjs";
-import { registerWebProIpc } from "./web-pro-ipc.mjs";
 import { remainingFromBilling } from "../shared/billing-display.mjs";
 import {
   exportFilename,
@@ -185,7 +184,9 @@ import {
   openPreviewWindow,
   requestPreviewOpen,
   registerPreviewIpc,
+  snapshotPreview,
 } from "./preview-window.mjs";
+import { snapshotStage, WEB_PRO_URL } from "./web-pro-page.mjs";
 import { previewApiAddress, startPreviewApi } from "./preview-api.mjs";
 import { installDesktopPreviewSkill } from "./preview-mcp.mjs";
 import { enablePreviewRemoteDebugging } from "./preview-cdp.mjs";
@@ -206,6 +207,10 @@ import {
 
 // An explicit profile is a separate instance, including its browser storage and
 // working knowledge. Apply it before stores, logging, or the instance lock.
+const launchProject = app.commandLine.getSwitchValue("project");
+const launchPreviewUrl = app.commandLine.getSwitchValue("open-preview");
+const launchHandoffPrompt = app.commandLine.getSwitchValue("handoff-prompt");
+let launchPreviewStarted = false;
 const explicitUserData = app.commandLine.getSwitchValue("user-data-dir");
 if (explicitUserData) {
   if (!path.isAbsolute(explicitUserData)) {
@@ -857,10 +862,59 @@ function delivery() {
   });
 }
 
+async function afterLaunchSession(ws, result) {
+  if (launchPreviewStarted) return;
+  const url = launchPreviewUrl || (launchHandoffPrompt ? WEB_PRO_URL : "");
+  if (!url && !launchHandoffPrompt) return;
+  if (!ws?.win || ws.win.isDestroyed() || !result?.sessionId || !ws.agent) return;
+  launchPreviewStarted = true;
+  const evidence = {
+    at: new Date().toISOString(),
+    pid: process.pid,
+    executable: process.execPath,
+    appPath: app.getAppPath(),
+    userData: app.getPath("userData"),
+    grokHome: grokHomeDir(),
+    sessionId: result.sessionId,
+    cwd: result.cwd,
+    previewUrl: url || null,
+    stage: null,
+    complete: false,
+    snapshotExcerpt: "",
+  };
+  try {
+    if (url) {
+      await openPreviewWindow({ owner: ws.win, sessionId: result.sessionId, url });
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const snap = await snapshotPreview();
+      const text = String(snap?.text || "");
+      evidence.stage = snapshotStage(text);
+      evidence.snapshotExcerpt = text.slice(0, 2000);
+    }
+    if (launchHandoffPrompt) {
+      const prompt = fs.readFileSync(launchHandoffPrompt, "utf8");
+      if (!String(prompt).trim()) throw new Error("handoff prompt is empty");
+      delivery().submit(ws.agent, {
+        id: "launch-handoff",
+        sessionId: result.sessionId,
+        cwd: result.cwd,
+        text: prompt,
+        images: [],
+        mode: "auto",
+      });
+      evidence.handoff = path.resolve(launchHandoffPrompt);
+    }
+  } catch (error) {
+    evidence.error = String(error?.message || error);
+    evidence.stage = evidence.stage || "error";
+  }
+  evidence.complete = false;
+  fs.writeFileSync(path.join(app.getPath("userData"), "preview-launch.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+}
+
 function registerIpc() {
   registerKnowledgeTransferIpc(ipcMain, {dialog, windowFromEvent: e => BrowserWindow.fromWebContents(e.sender)});
   registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
-  registerWebProIpc(ipcMain, { userData: () => app.getPath("userData"), windowFromEvent: e => BrowserWindow.fromWebContents(e.sender) });
   registerContinuationIpc(ipcMain, {
     home:grokHomeDir, userData:()=>app.getPath("userData"), dialog,
     windowFromEvent:e=>BrowserWindow.fromWebContents(e.sender),
@@ -1227,6 +1281,7 @@ function registerIpc() {
         remember: rememberProjectSession,
       });
       await commitFamilyAfterOpen(cwd, ws.agent, plan.acpWorktrees);
+      void afterLaunchSession(ws, result);
       return result;
     } finally {
       if (ws.openingCwd === cwd) ws.openingCwd = null;
@@ -2301,7 +2356,7 @@ app.whenReady().then(() => {
   registerIpc();
   wireWindowMenuRefresh();
   // Native splash first; main window stays hidden until the renderer paints.
-  createWindow({ splash: true });
+  createWindow({ splash: true, cwd: launchProject || undefined });
   installApplicationMenu();
   setupAutoUpdater({ disposeAgent: disposeAgentQuick });
 

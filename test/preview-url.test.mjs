@@ -262,7 +262,7 @@ test("desktop-preview skill names the Preview MCP tools", () => {
   assert.match(skill, /second browser/i);
 });
 
-test("web-pro skill requires bound Preview and forbids simulated Pro output", () => {
+test("web-pro skill requires bound Preview, live Pro selection, and forbids simulated Pro output", () => {
   const skill = fs.readFileSync(
     new URL("../electron/web-pro/SKILL.md", import.meta.url),
     "utf8",
@@ -270,8 +270,11 @@ test("web-pro skill requires bound Preview and forbids simulated Pro output", ()
   assert.match(skill, /chatgpt.com/);
   assert.match(skill, /desktop-preview__preview_open/);
   assert.match(skill, /Restart agent/);
+  assert.match(skill, /currently selected model/);
+  assert.match(skill, /专业版/);
   assert.match(skill, /Do not write the answer yourself/);
   assert.match(skill, /cloakbrowser/i);
+  assert.doesNotMatch(skill, /recordWebProResult/);
 });
 
 test("user capture caption names the URL", () => {

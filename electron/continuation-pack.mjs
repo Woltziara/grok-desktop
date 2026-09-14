@@ -10,12 +10,20 @@ import {storedAliasSessions} from './session-paths.mjs';
 import {atomicWrite,assertSessionOutbox} from './session-delivery.mjs';
 const FORMAT='grok-desktop-continuation-v1', LIMIT=128*1024*1024;
 const CORE=new Set(['summary.json','updates.jsonl','chat_history.jsonl','plan.json','rewind_points.jsonl','signals.json','feedback.jsonl','desktop-continuation.json','tasks.json','system_prompt.txt','prompt_context.json','tool_definitions.json']);
-const NATIVE_DIRS=new Set(['attachments','compaction_checkpoints','subagents']);
+const TREE_DIRS=new Set(['attachments','compaction_checkpoints']);
+const SUBAGENT_FILES=new Set(['meta.json']);
 export function isNativeSessionPath(name){
   if(typeof name!=='string'||!name)return false;
-  if(CORE.has(name))return true;
-  const top=name.split('/')[0];
-  return NATIVE_DIRS.has(top)&&(name.includes('/')||NATIVE_DIRS.has(name));
+  const parts=name.split('/');
+  if(parts.some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='mcp'))return false;
+  if(parts.length===1&&CORE.has(name))return true;
+  const top=parts[0];
+  if(TREE_DIRS.has(top))return true;
+  if(top==='subagents'){
+    if(parts.length<=2)return true;
+    return parts.length===3&&SUBAGENT_FILES.has(parts[2]);
+  }
+  return false;
 }
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const clone=x=>JSON.parse(JSON.stringify(x));

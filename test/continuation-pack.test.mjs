@@ -41,3 +41,22 @@ test('native export keeps conversation attachments and documented session files,
   assert.equal(fs.existsSync(path.join(native(b),'mcp')),false);
   assert.equal(fs.readFileSync(path.join(native(b),'system_prompt.txt'),'utf8'),'synthetic prompt');
 });
+test('nested subagent MCP stores are not native session materials; documented subagent meta still continues',t=>{
+  const {a,b,native}=setup(t);
+  const child=path.join(native(a),'subagents','child-1');
+  fs.mkdirSync(path.join(child,'mcp','server'),{recursive:true});
+  fs.writeFileSync(path.join(child,'meta.json'),JSON.stringify({id:'child-1',kind:'explore'}));
+  fs.writeFileSync(path.join(child,'mcp','server','session-token.json'),JSON.stringify({token:'nested-synthetic-token'}));
+  fs.writeFileSync(path.join(child,'notes.txt'),'not documented session material');
+  assert.equal(isNativeSessionPath('subagents/child-1/mcp/server/session-token.json'),false);
+  assert.equal(isNativeSessionPath('subagents/child-1/meta.json'),true);
+  assert.equal(isNativeSessionPath('subagents/child-1/notes.txt'),false);
+  const bundle=exportContinuation(a);
+  const names=bundle.native.map(r=>r.path);
+  assert.ok(names.includes('subagents/child-1/meta.json'));
+  assert.equal(names.some(name=>name.split('/').some(p=>p.toLowerCase()==='mcp')),false);
+  assert.equal(JSON.stringify(bundle).includes('nested-synthetic-token'),false);
+  incoming(b,bundle);
+  assert.equal(fs.readFileSync(path.join(native(b),'subagents','child-1','meta.json'),'utf8'),JSON.stringify({id:'child-1',kind:'explore'}));
+  assert.equal(fs.existsSync(path.join(native(b),'subagents','child-1','mcp')),false);
+});
