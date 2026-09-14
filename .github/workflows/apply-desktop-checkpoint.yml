@@ -1,0 +1,70 @@
+name: Apply verified desktop checkpoint
+on:
+  push:
+    branches: [pro/complete-desktop-20260914]
+    paths: [.desktop-transfer.json]
+permissions:
+  contents: read
+concurrency:
+  group: desktop-checkpoint-transport
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: github.repository == 'Woltziara/grok-desktop' && github.ref == 'refs/heads/pro/complete-desktop-20260914'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Validate and apply exact source bytes
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, pathlib, subprocess
+          payload = json.loads(pathlib.Path('.desktop-transfer.json').read_text())
+          subprocess.run(['git','merge-base','--is-ancestor',payload['baseCommit'],'HEAD'],check=True)
+          patch = gzip.decompress(base64.b64decode(payload['gzipBase64'],validate=True))
+          assert len(patch) <= 8_000_000, 'oversized source patch'
+          assert hashlib.sha256(patch).hexdigest() == payload['patchSha256'], 'transport hash mismatch'
+          target = pathlib.Path('/tmp/desktop-checkpoint.patch'); target.write_bytes(patch)
+          stat = subprocess.check_output(['git','apply','--numstat',str(target)],text=True)
+          for row in stat.splitlines():
+              path = row.split('\t',2)[2]
+              assert '..' not in pathlib.PurePosixPath(path).parts
+              assert path.startswith(('electron/','shared/','src/','test/','scripts/','docs/')) or path in ('README.md','IMPLEMENTATION-RESULT.md','package.json','package-lock.json','tsconfig.json','vite.config.ts'), path
+          subprocess.run(['git','apply','--index','--check',str(target)],check=True)
+          subprocess.run(['git','apply','--index',str(target)],check=True)
+          message = payload['message']
+          assert isinstance(message,str) and 1 <= len(message) <= 200
+          pathlib.Path('/tmp/desktop-checkpoint-message.txt').write_text(message)
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check the actual applied source
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/desktop-checkpoint-evidence
+          npm ci
+          npm run check 2>&1 | tee /tmp/desktop-checkpoint-evidence/check.log
+          npm run build 2>&1 | tee /tmp/desktop-checkpoint-evidence/build.log
+      - name: Commit actual files to the same branch, fast-forward only
+        run: |
+          git rm .desktop-transfer.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -F /tmp/desktop-checkpoint-message.txt
+          git push origin HEAD:refs/heads/pro/complete-desktop-20260914
+          git rev-parse HEAD > /tmp/desktop-checkpoint-evidence/source-commit.txt
+          git archive --format=tar HEAD | gzip -n > /tmp/desktop-checkpoint-evidence/source.tar.gz
+          sha256sum /tmp/desktop-checkpoint-evidence/source.tar.gz > /tmp/desktop-checkpoint-evidence/source.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-checkpoint-${{ github.sha }}
+          path: /tmp/desktop-checkpoint-evidence/*
+          retention-days: 7
