@@ -30,7 +30,14 @@ jobs:
               patch = payload['patchText'].encode('utf-8')
               assert payload.get('expectedBlobs'), 'readable patches require resulting blob identities'
           else:
-              patch = gzip.decompress(base64.b64decode(payload['gzipBase64'],validate=True))
+              encoded = payload.get('gzipBase64', '')
+              if 'partCount' in payload:
+                  count = payload['partCount']
+                  assert type(count) is int and 1 <= count <= 64
+                  parts = [pathlib.Path(f'.desktop-transfer.part-{i:02d}') for i in range(count)]
+                  assert all(p.is_file() and not p.is_symlink() and p.stat().st_size <= 16384 for p in parts)
+                  encoded = ''.join(p.read_text().strip() for p in parts)
+              patch = gzip.decompress(base64.b64decode(encoded,validate=True))
               assert hashlib.sha256(patch).hexdigest() == payload['patchSha256'], 'transport hash mismatch'
           assert len(patch) <= 8_000_000, 'oversized source patch'
           target = pathlib.Path('/tmp/desktop-checkpoint.patch'); target.write_bytes(patch)
@@ -65,7 +72,12 @@ jobs:
           npm run build 2>&1 | tee /tmp/desktop-checkpoint-evidence/build.log
       - name: Commit actual files to the same branch, fast-forward only
         run: |
-          git rm .desktop-transfer.json
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          payload = json.loads(pathlib.Path('.desktop-transfer.json').read_text())
+          count = payload.get('partCount', 0)
+          subprocess.run(['git','rm','.desktop-transfer.json']+[f'.desktop-transfer.part-{i:02d}' for i in range(count)], check=True)
+          PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -F /tmp/desktop-checkpoint-message.txt
