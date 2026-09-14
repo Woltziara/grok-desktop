@@ -1,3 +1,4 @@
+import { recoverObjectTransfer } from "./object-transaction.mjs";
 /**
  * Local JSON working-knowledge store. Keyed by business object, not cwd.
  */
@@ -146,6 +147,10 @@ export function ensureStore(root) {
   }
   fs.mkdirSync(path.join(base, "objects"), { recursive: true });
   fs.mkdirSync(path.join(base, "probe"), { recursive: true });
+  const journals = path.join(base, "transfer-journals");
+  if (fs.existsSync(journals)) for (const name of fs.readdirSync(journals)) {
+    if (name.endsWith(".json") && isSafeObjectId(name.slice(0, -5))) recoverObjectTransfer(base, name.slice(0, -5));
+  }
   return base;
 }
 
@@ -205,6 +210,7 @@ export function ensureObject(root, objectId, meta = {}) {
   if (!isSafeObjectId(objectId)) {
     throw new Error(`Invalid object id: ${objectId}`);
   }
+  recoverObjectTransfer(root, objectId);
   const dir = objectDir(root, objectId);
   fs.mkdirSync(dir, { recursive: true });
   const metaFile = path.join(dir, "object.json");
@@ -255,6 +261,7 @@ export function listObjects(root) {
 
 export function readRecords(root, objectId) {
   if (!isSafeObjectId(objectId)) return [];
+  recoverObjectTransfer(root, objectId);
   const file = path.join(objectDir(root, objectId), "records.jsonl");
   return readJsonl(file);
 }

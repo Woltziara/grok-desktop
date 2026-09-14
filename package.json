@@ -26,7 +26,8 @@
     "check": "npm run typecheck && npm test",
     "test:preview": "node scripts/test-preview.mjs",
     "test:sidebar": "node scripts/test-sidebar.mjs",
-    "test:delivery": "node scripts/test-delivery.mjs"
+    "test:delivery": "node scripts/test-delivery.mjs",
+    "test:knowledge-transfer": "node scripts/test-knowledge-transfer.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

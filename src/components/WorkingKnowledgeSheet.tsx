@@ -1,3 +1,4 @@
+import { WorkingKnowledgeTransfer } from "./WorkingKnowledgeTransfer";
 import { useEffect, useMemo, useState } from "react";
 import type {
   WorkingKnowledgeItem,
@@ -75,6 +76,9 @@ export function WorkingKnowledgeSheet({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [createNote, setCreateNote] = useState("");
+  const [newTitle, setNewTitle] = useState("");
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -136,7 +140,7 @@ export function WorkingKnowledgeSheet({
             <select
               className="settings-select"
               disabled={busy}
-              value={snap?.currentObjectId || ""}
+              value={snap?.activeObjectId || ""}
               onChange={(e) => onSetObject(e.target.value)}
             >
               <option value="">未指定（不写入任何对象）</option>
@@ -148,6 +152,9 @@ export function WorkingKnowledgeSheet({
             </select>
           </div>
 
+          <div className="wk-item-actions"><input className="settings-input" aria-label="新业务对象名称" placeholder="给新的一件事取个名字" value={newTitle} onChange={e=>setNewTitle(e.target.value)} maxLength={200}/><button className="btn ghost btn-sm" disabled={busy||creating||!newTitle.trim()} onClick={async()=>{setCreating(true);try{const created=await window.grokDesktop.createWorkingKnowledgeObject(newTitle);onSetObject(created.id);setNewTitle("");setCreateNote("");}catch(error){setCreateNote(String((error as Error).message||error));}finally{setCreating(false);}}}>新建一件事</button></div>
+          {createNote&&<p role="status">{createNote}</p>}
+          <WorkingKnowledgeTransfer objectId={snap?.activeObjectId} onChanged={onReload}/>
           {saveNote ? <p className="wk-save-note">{saveNote}</p> : null}
 
           <p className="settings-desc">
@@ -201,6 +208,7 @@ export function WorkingKnowledgeSheet({
                       ) : (
                         <p className="wk-item-text">{item.text}</p>
                       )}
+                      {item.source&&<details className="settings-desc"><summary>查看来源</summary><p>{item.source.type==='user'?'用户原话或界面纠正':item.source.type||'来源待核'}</p>{item.source.quote&&<blockquote>{item.source.quote}</blockquote>}<p>{item.source.sessionId?`原会话：${item.source.sessionId}`:''} {item.source.inboxId?`原话标识：${item.source.inboxId}`:''} {item.source.pointer||''}</p></details>}
                       {item.analysis ? (
                         <p className="wk-item-analysis">理由：{item.analysis}</p>
                       ) : null}

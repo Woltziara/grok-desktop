@@ -1,3 +1,4 @@
+import { registerKnowledgeTransferIpc } from "./knowledge-transfer-ipc.mjs";
 import { createSessionDelivery } from "./session-delivery.mjs";
 import { registerDeliveryIpc } from "./delivery-ipc.mjs";
 import { resolveMovedSessionCwd } from "./session-move.mjs";
@@ -860,6 +861,7 @@ function delivery() {
 }
 
 function registerIpc() {
+  registerKnowledgeTransferIpc(ipcMain, {dialog, windowFromEvent: e => BrowserWindow.fromWebContents(e.sender)});
   registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
   ipcMain.on("window:ready", (e) => {
     const reveal = revealByWebContents.get(e.sender);

@@ -83,6 +83,12 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   getMemoryStatus: () => ipcRenderer.invoke("memory:status"),
   setMemoryEnabled: (value) => ipcRenderer.invoke("memory:set-enabled", value),
   deleteMemoryEntry: (entryId) => ipcRenderer.invoke("memory:delete", entryId),
+  createWorkingKnowledgeObject: title => ipcRenderer.invoke("working-knowledge:create", title),
+  exportWorkingKnowledge: objectId => ipcRenderer.invoke("working-knowledge:export", objectId),
+  importWorkingKnowledge: () => ipcRenderer.invoke("working-knowledge:import"),
+  listWorkingKnowledgeTransfers: () => ipcRenderer.invoke("working-knowledge:transfers"),
+  previewWorkingKnowledgeTransfer: token => ipcRenderer.invoke("working-knowledge:transfer-preview", token),
+  acceptWorkingKnowledgeTransfer: input => ipcRenderer.invoke("working-knowledge:transfer-accept", input),
   workingKnowledgeStatus: (opts) =>
     ipcRenderer.invoke("working-knowledge:status", opts || {}),
   setWorkingKnowledgeEnabled: (value) =>

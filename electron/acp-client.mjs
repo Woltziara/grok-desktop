@@ -1837,7 +1837,7 @@ export class GrokAcpClient extends EventEmitter {
       id: crypto.randomUUID(), sessionId, cwd, inboxId: wrapped.inboxId,
       objectId: wrapped.objectId || "", cancelled: false,
       inboxIds: [...(wrapped.inboxIds || (wrapped.inboxId ? [wrapped.inboxId] : []))],
-      bindingRevision: wrapped.bindingRevision, enableRevision: wrapped.enableRevision,
+      bindingRevision: wrapped.bindingRevision, enableRevision: wrapped.enableRevision, objectEpoch: wrapped.objectEpoch,
     };
     this._activeTurn = turn;
     this.turnOpen = true;

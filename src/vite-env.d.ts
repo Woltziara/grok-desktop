@@ -475,7 +475,7 @@ export type WorkingKnowledgeItem = {
   scope?: string;
   basis?: string;
   version?: number;
-  source?: { type?: string; pointer?: string; quote?: string };
+  source?: { type?: string; pointer?: string; quote?: string; sessionId?: string; inboxId?: string };
 };
 
 export type WorkingKnowledgeSnapshot = {
@@ -689,6 +689,12 @@ declare global {
       }>;
       setMemoryEnabled: (value: boolean) => Promise<{ enabled: boolean }>;
       deleteMemoryEntry: (entryId: string) => Promise<{ ok: boolean }>;
+      createWorkingKnowledgeObject: (title:string) => Promise<{id:string;title:string}>;
+      exportWorkingKnowledge: (objectId:string) => Promise<{ok?:boolean;cancelled?:boolean;path?:string;head?:string}>;
+      importWorkingKnowledge: () => Promise<{cancelled?:boolean;plan?:WorkingKnowledgeTransferPlan}>;
+      listWorkingKnowledgeTransfers: () => Promise<Array<{token:string;objectId:string;title:string;sourceMachine:string}>>;
+      previewWorkingKnowledgeTransfer: (token:string) => Promise<WorkingKnowledgeTransferPlan>;
+      acceptWorkingKnowledgeTransfer: (input:{token:string;localHead:string|null;choice:'continue'|'keep-local'|'use-incoming'}) => Promise<{ok:boolean;changed:boolean;objectId:string;backup?:string|null;head?:string}>;
       workingKnowledgeStatus: (opts?: {
         sessionId?: string | null;
         cwd?: string | null;
@@ -956,3 +962,5 @@ export type DeliveryRow = {
 };
 export type DeliveryState = {sessionId: string; cwd: string; revision: number; paused: boolean; busy: boolean; items: DeliveryRow[]};
 export type DeliveryEvent = {type: string; sessionId: string; cwd?: string; state?: DeliveryState; row?: DeliveryRow; method?: "prompt" | "interject"; ok?: boolean; cancelled?: boolean; error?: string};
+
+export type WorkingKnowledgeTransferPlan = {token:string;objectId:string;title:string;localTitle:string|null;sourceMachine:string;kind:'new'|'equal'|'local-ahead'|'incoming-ahead'|'conflict';localHead:string|null;incomingHead:string;changes:Array<{id:string;local:WorkingKnowledgeItem|null;incoming:WorkingKnowledgeItem|null}>;localPending:number;incomingPending:number;exportedAt:string};

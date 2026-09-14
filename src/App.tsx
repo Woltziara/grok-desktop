@@ -1323,7 +1323,7 @@ export default function App() {
       sessionId,
       cwd: project,
     });
-    setKnowledge(snap);
+    if (sessionIdRef.current === sessionId && !openingRef.current) setKnowledge(snap);
   }, [sessionId, project]);
 
   useEffect(() => {

@@ -1,3 +1,4 @@
+import { objectEpoch } from "../shared/working-knowledge/object-transaction.mjs";
 /**
  * Main-process facade: wrap ACP prompts and consume turn output.
  */
@@ -229,6 +230,7 @@ export function wrapOutgoingPrompt({
     inboxIds: [...new Set([...(built.inboxIds || []), inboxId].filter(Boolean))],
     bindingRevision: sessionBinding(root, sessionId)?.revision || sessionBinding(root, sessionId)?.at || null,
     enableRevision: cfg.enableRevision || null,
+    objectEpoch: objectEpoch(root, objectId),
   };
 }
 
@@ -253,6 +255,7 @@ export function consumeTurnOutput({
   inboxIds,
   bindingRevision,
   enableRevision,
+  objectEpoch: expectedObjectEpoch,
   cancelled = false,
 }) {
   const root = ensureReady();
@@ -272,6 +275,9 @@ export function consumeTurnOutput({
   const oid = objectId ?? (bound ? bound.objectId : cfg.currentObjectId || "");
   if (!oid) {
     return { ok: true, skipped: true, reason: "unbound" };
+  }
+  if (expectedObjectEpoch !== undefined && expectedObjectEpoch !== objectEpoch(root, oid)) {
+    return { ok: true, skipped: true, reason: "object-transferred" };
   }
   const result = applyCommitFromAssistantText(root, assistantText || "", {
     objectId: oid,
