@@ -309,6 +309,9 @@ export class GrokAcpClient extends EventEmitter {
     this._needsPromptRestart = false;
     this._discardUpdates = false;
     this._restartPromise = null;
+    this._suppressReplay = false;
+    this._cancelRevision = 0;
+    this._resumeSessionId = null;
     this._interjectionCalls = new Map();
     this.terminals = new AcpTerminalManager({
       defaultCwd: this.cwd,
@@ -428,6 +431,9 @@ export class GrokAcpClient extends EventEmitter {
     });
 
     const spawned = this.proc;
+    // Quarantine belongs to the retired transport, not to this new connection.
+    // In particular session/load may need trust/elicitation before it can finish.
+    this._discardUpdates = false;
     this.proc.on("error", (err) => {
       if (this.proc !== spawned) return;
       const wrapped = isMissingGrokBinaryError(err)
@@ -722,13 +728,13 @@ export class GrokAcpClient extends EventEmitter {
     const c = classifyInboundMessage(msg);
     // Once cancelled, untagged events from this transport have no trustworthy
     // turn identity. Ignore them until a fresh transport resumes the same session.
-    if (this._discardUpdates && c.kind === "session-update") {
+    if ((this._discardUpdates || this._suppressReplay) && c.kind === "session-update") {
       if (c.expectsEmptyAck) { this._ensureOnce().beginRequest(c.id); this._respond(c.id, {}); }
       return;
     }
     const interjection = unwrapSessionInterjection(msg.method, msg.params);
     if (interjection) {
-      if (!this._discardUpdates) this.emit("session-interjection", interjection);
+      if (!this._discardUpdates && !this._suppressReplay) this.emit("session-interjection", interjection);
       if (msg.id !== undefined) {
         this._ensureOnce().beginRequest(msg.id);
         this._respond(msg.id, {});
@@ -745,7 +751,7 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     if (mcpEvent && isMcpLiveEventMethod(mcpEvent.method)) {
-      this.emit("mcp-status", mcpEvent);
+      if (!this._discardUpdates) this.emit("mcp-status", mcpEvent);
       if (msg.id !== undefined) {
         this._ensureOnce().beginRequest(msg.id);
         this._respond(msg.id, {});
@@ -1117,9 +1123,9 @@ export class GrokAcpClient extends EventEmitter {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
         reject(
-          new Error(
+          Object.assign(new Error(
             `ACP request timed out after ${timeoutMs}ms: ${method}`,
-          ),
+          ), { code: "ACP_REQUEST_TIMEOUT", method }),
         );
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method });
@@ -1767,15 +1773,35 @@ export class GrokAcpClient extends EventEmitter {
   async _resumeAfterCancellation() {
     if (!this._needsPromptRestart) return;
     if (!this._restartPromise) {
-      const sessionId = this.sessionId;
+      const sessionId = this._resumeSessionId || this.sessionId;
+      if (!sessionId) throw new Error("Cannot recover a cancelled turn without its session id");
       const mode = this.currentModeId;
+      const revision = this._cancelRevision;
+      this._resumeSessionId = sessionId;
       this._restartPromise = (async () => {
         await this.dispose();
-        this._discardUpdates = true; // suppress session/load replay already visible in the UI
-        await this.start({ resumeSessionId: sessionId });
-        if (mode && mode !== this.currentModeId) await this.setSessionMode(mode);
-        this._needsPromptRestart = false;
-        this._discardUpdates = false;
+        this._suppressReplay = true; // presentation only; never reject new reverse requests
+        try {
+          await this.start({ resumeSessionId: sessionId });
+          if (revision !== this._cancelRevision) throw new Error("cancelled during session recovery");
+          if (mode && mode !== this.currentModeId) {
+            const restored = await this.setSessionMode(mode);
+            if (!restored.agentSynced) throw new Error(restored.error || "Session mode recovery failed");
+          }
+          if (revision !== this._cancelRevision) throw new Error("cancelled during session recovery");
+          this._needsPromptRestart = false;
+          this._resumeSessionId = null;
+        } catch (err) {
+          // A failed load must not leave a live half-initialized connection or
+          // lose the original resume target. The next user retry can reload it.
+          await this.dispose();
+          this.sessionId = sessionId;
+          this._needsPromptRestart = true;
+          if (revision !== this._cancelRevision) throw new Error("cancelled during session recovery");
+          throw err;
+        } finally {
+          this._suppressReplay = false;
+        }
       })().finally(() => { this._restartPromise = null; });
     }
     return this._restartPromise;
@@ -1813,6 +1839,11 @@ export class GrokAcpClient extends EventEmitter {
       await Promise.allSettled(turn.interjections || []);
       if (this._activeTurn !== turn || turn.cancelled) throw new Error("cancelled");
       const cancelled = result?.stopReason === "cancelled" || result?.stop_reason === "cancelled";
+      if (cancelled) {
+        turn.cancelled = true;
+        this._needsPromptRestart = true;
+        this._discardUpdates = true;
+      }
       try {
         const receipt = this._promptLifecycle.consume({
           ...turn, assistantText: this._turnAssistantBuf, cancelled,
@@ -1825,7 +1856,14 @@ export class GrokAcpClient extends EventEmitter {
       completed = !cancelled;
       return result;
     } catch (err) {
-      if (this._activeTurn === turn) { this._needsPromptRestart = true; this._discardUpdates = true; }
+      // An explicit RPC error (rate limit, auth, invalid input, etc.) is a
+      // completed request, not a cancelled connection. Keep that connection
+      // usable. Only cancellation or a timeout with an unknown remote outcome
+      // requires a new transport before the next prompt.
+      if (this._activeTurn === turn && (turn.cancelled || err?.code === -32800 || err?.code === "ACP_REQUEST_TIMEOUT")) {
+        this._needsPromptRestart = true;
+        this._discardUpdates = true;
+      }
       throw err;
     } finally {
       // An older finally must never clear the next turn's state.
@@ -1873,6 +1911,7 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   cancel() {
+    this._cancelRevision = (this._cancelRevision || 0) + 1;
     // ACP: Client MUST respond to pending request_permission with cancelled.
     // Also settle extension gates via main (plan/ask) — caller should use
     // clearPendingPermissions. Kill tool shells so terminal/wait_for_exit

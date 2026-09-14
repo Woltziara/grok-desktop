@@ -68,11 +68,16 @@ function allowedInboxIds(ctx) {
 function exactUserEvidence(root, objectId, ctx, change) {
   if (!ctx.fromModel) return null;
   const allowed = allowedInboxIds(ctx);
-  return listInbox(root, objectId, "pending").find((row) => {
+  // A quote is content, not event identity. Honor a change's explicit source
+  // ids before matching text; never silently substitute another session/turn.
+  // Legacy one-input commits may omit inboxIds and use only ctx.inboxId.
+  const requested = new Set(change.inboxIds.length ? change.inboxIds : [ctx.inboxId].filter(Boolean));
+  const matches = listInbox(root, objectId, "pending").filter((row) => {
     const quote = String(row.text || "").trim();
-    return allowed.has(row.id) && row.source === "user" && quote &&
+    return requested.has(row.id) && allowed.has(row.id) && row.source === "user" && quote &&
       change.sourceQuote === quote && change.text === quote;
-  }) || null;
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function protectedSupersedeTargets(current, change) {

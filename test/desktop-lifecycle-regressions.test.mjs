@@ -39,12 +39,13 @@ test('accepted interjection reaches the actual prompt source set once, by id rat
   const inputs = listInbox(dir,'alpha').filter(r => r.delivery === 'interjection');
   assert.equal(inputs.length,2);
   assert.equal(c._activeTurn.inboxIds.includes(inputs[0].id),true);
-  c._turnAssistantBuf = commit(dir,[{kind:'correction',text:'预算是90',sourceQuote:'预算是90',epistemic:'user_said',inboxIds:[inputs[0].id]}]);
+  c._turnAssistantBuf = commit(dir,[{kind:'correction',text:'预算是90',sourceQuote:'预算是90',epistemic:'user_said',inboxIds:[inputs[1].id]}]);
   done.resolve({stopReason:'end_turn'}); await running;
   const record = readCurrent(dir,'alpha').items.find(x=>x.text === '预算是90');
-  assert.equal(record.source.type,'user'); assert.equal(record.source.inboxId,inputs[0].id);
+  assert.equal(record.source.type,'user'); assert.equal(record.source.inboxId,inputs[1].id);
   assert.equal(record.source.sessionId,'s1');
-  assert.equal(listInbox(dir,'alpha').some(x=>x.id===inputs[1].id),true);
+  assert.equal(listInbox(dir,'alpha').some(x=>x.id===inputs[0].id),true);
+  assert.equal(listInbox(dir,'alpha').some(x=>x.id===inputs[1].id),false);
 });
 
 test('failed interjection preserves original pending without licensing it as a current-turn source', async () => {
@@ -122,4 +123,31 @@ test('cancel and grants are scoped to one conversation in the same window',()=>{
   cancelAllPermissions(undefined,'window','A');
   assert.deepEqual(outcomes.map(x=>x[0]),['A']);assert.deepEqual(listPendingPermissionRequests('window').map(x=>x.reqId),['B']);
   assert.equal(settlePendingAllowOnce('window','A'),0);assert.equal(settlePendingAllowOnce('window','B'),1);
+});
+
+
+test('explicit second same-text source keeps its own session and does not consume the first',()=>{
+  const dir=root();
+  const a=appendInbox(dir,{objectId:'alpha',sessionId:'s1',cwd:'/first',text:'同一句更正'});
+  const b=appendInbox(dir,{objectId:'alpha',sessionId:'s2',cwd:'/second',text:'同一句更正'});
+  const result=applyCommitFromAssistantText(dir,commit(dir,[{kind:'correction',text:b.text,sourceQuote:b.text,inboxIds:[b.id]}]),{objectId:'alpha',inboxId:a.id,inboxIds:[a.id,b.id],sessionId:'s1'});
+  assert.deepEqual(result.processedInbox,[b.id]);
+  const saved=readCurrent(dir,'alpha').items[0];
+  assert.equal(saved.source.inboxId,b.id);assert.equal(saved.source.sessionId,'s2');assert.equal(saved.source.cwd,'/second');
+  assert.equal(listInbox(dir,'alpha').some(r=>r.id===a.id),true);
+});
+
+test('an explicit unseen id cannot borrow the matching quote from this turn',()=>{
+  const dir=root();const a=appendInbox(dir,{objectId:'alpha',sessionId:'s1',text:'相同原话'});
+  const b=appendInbox(dir,{objectId:'alpha',sessionId:'s2',text:'相同原话'});
+  const result=applyCommitFromAssistantText(dir,commit(dir,[{kind:'correction',text:b.text,sourceQuote:b.text,inboxIds:[b.id]}]),{objectId:'alpha',inboxId:a.id,sessionId:'s1'});
+  assert.deepEqual(result.processedInbox,[]);assert.equal(readCurrent(dir,'alpha').items[0].epistemic,'model_inferred');
+  assert.equal(listInbox(dir,'alpha').length,2);
+});
+
+test('multiple explicitly cited identical sources are not arbitrarily attributed to the first',()=>{
+  const dir=root();const a=appendInbox(dir,{objectId:'alpha',sessionId:'s1',text:'相同原话'});
+  const b=appendInbox(dir,{objectId:'alpha',sessionId:'s2',text:'相同原话'});
+  applyCommitFromAssistantText(dir,commit(dir,[{kind:'inference',text:b.text,sourceQuote:b.text,inboxIds:[a.id,b.id]}]),{objectId:'alpha',inboxId:a.id,inboxIds:[b.id],sessionId:'s1'});
+  const item=readCurrent(dir,'alpha').items[0];assert.equal(item.source.type,'model');assert.equal(item.source.inboxId,undefined);
 });
