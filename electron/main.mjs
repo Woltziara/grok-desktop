@@ -867,6 +867,7 @@ async function afterLaunchSession(ws, result) {
   const url = launchPreviewUrl || (launchHandoffPrompt ? WEB_PRO_URL : "");
   if (!url && !launchHandoffPrompt) return;
   if (!ws?.win || ws.win.isDestroyed() || !result?.sessionId || !ws.agent) return;
+  if (launchProject && path.resolve(result.cwd) !== path.resolve(launchProject)) return;
   launchPreviewStarted = true;
   const evidence = {
     at: new Date().toISOString(),
@@ -885,11 +886,14 @@ async function afterLaunchSession(ws, result) {
   try {
     if (url) {
       await openPreviewWindow({ owner: ws.win, sessionId: result.sessionId, url });
-      await new Promise((resolve) => setTimeout(resolve, 4000));
-      const snap = await snapshotPreview();
-      const text = String(snap?.text || "");
-      evidence.stage = snapshotStage(text);
-      evidence.snapshotExcerpt = text.slice(0, 2000);
+      for (let i = 0; i < 10; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const snap = await snapshotPreview();
+        const text = String(snap?.text || "");
+        evidence.stage = snapshotStage(text);
+        evidence.snapshotExcerpt = text.slice(0, 2000);
+        if (evidence.stage !== "unknown") break;
+      }
     }
     if (launchHandoffPrompt) {
       const prompt = fs.readFileSync(launchHandoffPrompt, "utf8");

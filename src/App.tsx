@@ -833,27 +833,19 @@ export default function App() {
   );
 
   const pendingOpenTried = useRef(false);
-  const autoHomeTried = useRef(false);
   useEffect(() => {
     if (!signedIn || pendingOpenTried.current) return;
     pendingOpenTried.current = true;
     void window.grokDesktop.takePendingOpen().then((pending) => {
       if (pending?.cwd) {
-        autoHomeTried.current = true;
         void openProject(pending.cwd, {
           allowSameCheckout: pending.allowSameCheckout,
         });
+        return;
       }
+      if (!project && info?.home) void openProject(info.home);
     });
-  }, [signedIn, openProject]);
-
-  useEffect(() => {
-    if (!signedIn || project || autoHomeTried.current) return;
-    const home = info?.home;
-    if (!home) return;
-    autoHomeTried.current = true;
-    void openProject(home);
-  }, [signedIn, project, info?.home, openProject]);
+  }, [signedIn, openProject, project, info?.home]);
 
   const pickProject = async () => {
     if (!signedIn || conn === "connecting") {

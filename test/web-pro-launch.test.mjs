@@ -9,6 +9,10 @@ test('main launch flags open Preview after a real session and never register a s
   assert.match(main, /afterLaunchSession/);
   assert.match(main, /preview-launch\.json/);
   assert.doesNotMatch(main, /registerWebProIpc|web-pro:create|recordWebProResult/);
+  assert.match(main, /path\.resolve\(result\.cwd\) !== path\.resolve\(launchProject\)/);
   const preload = readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
   assert.doesNotMatch(preload, /web-pro:/);
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /takePendingOpen\(\)\.then/);
+  assert.doesNotMatch(app, /autoHomeTried/);
 });
