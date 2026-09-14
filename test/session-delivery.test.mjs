@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { createSessionDelivery, createSessionOutbox, atomicWrite } from '../electron/session-delivery.mjs';
+import { createSessionDelivery, createSessionOutbox, atomicWrite, isUnknownDeliveryOutcome, notifySessionDelivery, windowShowsDelivery } from '../electron/session-delivery.mjs';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function waitFor(predicate) { for (let i=0;i<100;i++) { if(predicate())return; await tick(); } assert.fail('delivery condition did not settle'); }
 function fixture(t, options={}) {
@@ -124,6 +124,47 @@ test('real interject rejection pauses without enqueue fallback or cancelling a l
   service.submit(a,input('first'));await tick();service.submit(a,input('correction'));await tick();
   assert.equal(service.state('session-A').items.find(i=>i.id==='correction').status,'failed');assert.equal(a.calls.length,1);assert.equal(a.turnOpen,true);
   a.complete();await tick();assert.equal(a.calls.length,1);
+});
+
+test('lost interject receipts stay uncertain with original text and require an explicit retry',async t=>{
+  assert.equal(isUnknownDeliveryOutcome(Object.assign(new Error('timeout'),{code:'ACP_REQUEST_TIMEOUT'})),true);
+  assert.equal(isUnknownDeliveryOutcome(new Error('Agent exited (code=null, signal=SIGTERM)')),true);
+  assert.equal(isUnknownDeliveryOutcome(new Error('connection closed')),true);
+  assert.equal(isUnknownDeliveryOutcome(new Error('Agent disposed')),true);
+  assert.equal(isUnknownDeliveryOutcome(new Error('permission denied')),false);
+  const cases=[{message:'connection closed'},{message:'Agent process exited',code:'EPIPE'},{message:'rpc failed',code:'ACP_REQUEST_TIMEOUT'}];
+  for(const [index,lost] of cases.entries()){
+    const {service}=fixture(t),a=new Peer('session-lost-'+index);
+    service.submit(a,input('first'));await tick();
+    a.interject=async()=>{throw Object.assign(new Error(lost.message),lost.code?{code:lost.code}:{})};
+    service.submit(a,input('keep-this','keep-this'));
+    await waitFor(()=>service.state(a.sessionId).items.find(i=>i.id==='keep-this')?.status==='uncertain');
+    const row=service.state(a.sessionId).items.find(i=>i.id==='keep-this');
+    assert.equal(row.text,'keep-this');
+    assert.match(row.error,/确认没有回来|查看历史/);
+    assert.throws(()=>service.mutate(a.sessionId,'retry',{id:'keep-this'}),/明确确认/);
+    a.complete();await tick();
+  }
+});
+
+test('delivery events only go to the window currently showing that conversation and omit queued image bytes',async t=>{
+  const {service,events}=fixture(t),a=new Peer('session-A'),b=new Peer('session-B');
+  const picture={data:'A'.repeat(8000),mimeType:'image/png',id:'pic',name:'large.png'};
+  service.submit(a,{...input('with-image','with-image'),images:[picture]});await tick();
+  a.complete();await waitFor(()=>!service.state('session-A').busy);
+  const started=events.find(e=>e.type==='started'&&e.sessionId==='session-A');
+  assert.equal(started.row.images[0].data,picture.data);
+  assert.equal(started.state.items[0].images[0].data,undefined);
+  assert.equal(started.state.items[0].images[0].attached,true);
+  const shownA={agent:a,lastSessionId:'session-A'},shownB={agent:b,lastSessionId:'session-B'},parked={agent:b,lastSessionId:'session-B',parkedAgents:new Map([['session-A',a]])};
+  assert.equal(windowShowsDelivery(shownA,'session-A'),true);
+  assert.equal(windowShowsDelivery(shownB,'session-A'),false);
+  assert.equal(windowShowsDelivery(parked,'session-A'),false);
+  const hits=[];
+  notifySessionDelivery(started,[shownA,shownB,parked],ws=>hits.push(ws));
+  assert.deepEqual(hits,[shownA]);
+  const packed=JSON.stringify(started.state);
+  assert.equal(packed.includes(picture.data),false);
 });
 
 test('stop before the deferred first send and cold-start before first send never bypass pause',async t=>{

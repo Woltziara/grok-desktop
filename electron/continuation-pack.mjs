@@ -9,8 +9,14 @@ import {resolveMovedSessionCwd} from './session-move.mjs';
 import {storedAliasSessions} from './session-paths.mjs';
 import {atomicWrite,assertSessionOutbox} from './session-delivery.mjs';
 const FORMAT='grok-desktop-continuation-v1', LIMIT=128*1024*1024;
-const CORE=new Set(['summary.json','updates.jsonl','chat_history.jsonl','plan.json','rewind_points.jsonl','signals.json','feedback.jsonl','desktop-continuation.json','tasks.json']);
-const NATIVE_DIRS=new Set(['attachments','compaction_checkpoints','subagents','mcp']);
+const CORE=new Set(['summary.json','updates.jsonl','chat_history.jsonl','plan.json','rewind_points.jsonl','signals.json','feedback.jsonl','desktop-continuation.json','tasks.json','system_prompt.txt','prompt_context.json','tool_definitions.json']);
+const NATIVE_DIRS=new Set(['attachments','compaction_checkpoints','subagents']);
+export function isNativeSessionPath(name){
+  if(typeof name!=='string'||!name)return false;
+  if(CORE.has(name))return true;
+  const top=name.split('/')[0];
+  return NATIVE_DIRS.has(top)&&(name.includes('/')||NATIVE_DIRS.has(name));
+}
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const clone=x=>JSON.parse(JSON.stringify(x));
 const exists=p=>{try{fs.lstatSync(p);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}};
@@ -30,7 +36,7 @@ function fileRow(root,name){const file=safeUnder(root,name),stat=fs.statSync(fil
 function walk(root,dir='',filter=()=>true){
   const rows=[];for(const e of fs.readdirSync(path.join(root,dir),{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))){const name=dir?`${dir}/${e.name}`:e.name;if(!filter(name,e))continue;if(e.isSymbolicLink())throw Error(`接续范围含有符号链接，请另选原件：${name}`);if(e.isDirectory())rows.push(...walk(root,name,filter));else rows.push(fileRow(root,name));}return rows;
 }
-function nativeRows(dir){return walk(dir,'',(name)=>name.includes('/')?NATIVE_DIRS.has(name.split('/')[0]):CORE.has(name)||NATIVE_DIRS.has(name));}
+function nativeRows(dir){return walk(dir,'',(name)=>isNativeSessionPath(name));}
 function contentHash(rows){return hash(JSON.stringify(rows.map(r=>[r.path,r.sha256]).sort(([a],[b])=>a.localeCompare(b))));}
 function activeOutbox(root,id){const f=path.join(root,'outbox',id+'.json');if(!exists(f))return null;const value=JSON.parse(fs.readFileSync(f,'utf8'));return assertSessionOutbox(value,id);}
 function targetDir(home,cwd,id){if(!isSafeSessionId(id)||!path.isAbsolute(cwd||''))throw Error('对话和项目归属不完整。');return path.join(home,'sessions',encodeSessionCwd(cwd),id);}
@@ -52,7 +58,7 @@ export function exportContinuation({home,userData,cwd,sessionId,materials=[],flo
 function validateRows(rows,native=false){
   if(!Array.isArray(rows)||rows.length>20000)throw Error('接续文件列表不完整或过多。');const names=new Set();
   for(const row of rows){safeMaterialPath(row?.path);if(names.has(row.path))throw Error('接续包有重复路径。');names.add(row.path);
-    if(native&&!CORE.has(row.path)&&!NATIVE_DIRS.has(row.path.split('/')[0]))throw Error('不是受支持的原生会话文件。');
+    if(native&&!isNativeSessionPath(row.path))throw Error('不是受支持的原生会话文件。');
     if(typeof row.data!=='string'||Buffer.from(row.data,'base64').toString('base64')!==row.data||hash(Buffer.from(row.data,'base64'))!==row.sha256)throw Error('接续文件内容校验失败。');
   }
 }
@@ -106,7 +112,7 @@ export function acceptContinuation({home,userData,token,expected,choice,localFlo
   if(exists(path.join(dir,'journal.json')))throw Error('此接续上次中断，请先检查并恢复原件，不能覆盖备份后再试。');
   if(choice==='keep-local'){atomicWrite(path.join(dir,'result.json'),{choice});return {ok:true,changed:false};}
   const bundle=validateContinuation(JSON.parse(fs.readFileSync(path.join(dir,'incoming.json'),'utf8'))),snap=localSnapshot(home,userData,plan.cwd,bundle),backup=path.join(dir,'before');
-  const nativeStage=path.join(dir,'candidate');writeRows(nativeStage,bundle.native);
+  const nativeStage=path.join(dir,'candidate');writeRows(nativeStage,bundle.native.filter(r=>isNativeSessionPath(r.path)));
   const summaryFile=path.join(nativeStage,'summary.json'),summary=JSON.parse(fs.readFileSync(summaryFile,'utf8'));summary.info.cwd=plan.cwd;atomicWrite(summaryFile,summary);
   const maps=[{from:bundle.sourceCwd,to:plan.cwd},{from:bundle.sourceNative,to:snap.target.file}].sort((a,b)=>b.from.length-a.from.length);
   atomicWrite(path.join(nativeStage,'desktop-continuation.json'),{sourceCwd:bundle.sourceCwd,targetCwd:plan.cwd,pathMappings:maps,transferId:bundle.transferId,notice:'原话和历史未改写；旧绝对路径对应这里的新路径，未随包带来的外部资料必须重新选择。'});

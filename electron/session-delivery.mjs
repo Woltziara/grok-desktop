@@ -15,6 +15,41 @@ const IN_FLIGHT = new Set(['sending', 'interjecting', 'interjected']);
 const STATES = new Set(['queued', ...TERMINAL, ...IN_FLIGHT, 'failed', 'uncertain', 'cancelled']);
 const clone = value => JSON.parse(JSON.stringify(value));
 const message = error => String(error?.message || error || '发送未完成');
+/** Lost receipts after the remote may already have accepted the request. */
+export function isUnknownDeliveryOutcome(error) {
+  if (!error) return false;
+  if (error.code === 'ACP_REQUEST_TIMEOUT') return true;
+  return /connection closed|process exited|agent exited|disposed|EPIPE|ECONNRESET|socket hang up/i.test(message(error));
+}
+function unknownOutcomeNotice(kind, error) {
+  const who = kind === 'interject' ? '插话' : '这次发送';
+  return `${who}可能已经送到，但确认没有回来。原文仍保留，请先查看历史再决定是否重试。${message(error)}`;
+}
+/** A window only receives send-box events for the conversation it is currently showing. */
+export function windowShowsDelivery(ws, sessionId) {
+  if (!ws || ws.disposed) return false;
+  const id = String(sessionId || '');
+  if (!id) return false;
+  if (ws.agent?.sessionId && String(ws.agent.sessionId) === id) return true;
+  if (!ws.agent && ws.lastSessionId && String(ws.lastSessionId) === id) return true;
+  return false;
+}
+export function notifySessionDelivery(event, windows, sendToWindow) {
+  if (!event?.sessionId) return [];
+  const sent = [];
+  for (const ws of windows || []) {
+    if (!windowShowsDelivery(ws, event.sessionId)) continue;
+    sendToWindow(ws, event);
+    sent.push(ws);
+  }
+  return sent;
+}
+function stripImagePayload(images) {
+  return (images || []).map(({ data, ...rest }) => ({ ...rest, attached: Boolean(data) }));
+}
+function viewState(state) {
+  return { ...state, items: state.items.map(item => ({ ...item, images: stripImagePayload(item.images) })) };
+}
 const signature = payload => createHash('sha256').update(JSON.stringify([
   payload.text, payload.images.map(i => [i.mimeType, i.data]), payload.imageQuality,
   payload.timelineText, payload.origin, payload.purpose,
@@ -117,8 +152,12 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
     return { ...value, items: value.items.filter(i => !TERMINAL.has(i.status)), busy: busy(id) };
   }
   function emit(id, type = 'state', row, detail = {}) {
-    try { notify({ type, sessionId: id, cwd: store.read(id).cwd, state: state(id), row: row ? clone(row) : undefined, ...detail }); }
-    catch (error) { notify({ type: 'storage-error', sessionId: id, error: message(error) }); }
+    try {
+      const current = state(id);
+      const payload = row ? clone(row) : undefined;
+      if (payload && type !== 'started') payload.images = stripImagePayload(payload.images);
+      notify({ type, sessionId: id, cwd: current.cwd, state: viewState(current), row: payload, ...detail });
+    } catch (error) { notify({ type: 'storage-error', sessionId: id, error: message(error) }); }
   }
   function schedule(id) { setImmediate(() => { void pump(id).catch(error => notify({ type: 'storage-error', sessionId: id, error: message(error) })); }); }
   function bind(client) {
@@ -209,8 +248,14 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
       });
       emit(id, follow === 'queue' ? 'fallback' : 'interjected', row, { method: 'interject' });
     } catch (error) {
-      store.change(id, value => { const item = value.items.find(i => i.id === key); item.status = error?.code === 'ACP_REQUEST_TIMEOUT' ? 'uncertain' : 'failed'; item.error = message(error); value.paused = true; });
-      emit(id, 'settled', row, { method: 'interject', ok: false, error: message(error) });
+      const uncertain = isUnknownDeliveryOutcome(error);
+      store.change(id, value => {
+        const item = value.items.find(i => i.id === key);
+        item.status = uncertain ? 'uncertain' : 'failed';
+        item.error = uncertain ? unknownOutcomeNotice('interject', error) : message(error);
+        value.paused = true;
+      });
+      emit(id, 'settled', row, { method: 'interject', ok: false, error: uncertain ? unknownOutcomeNotice('interject', error) : message(error) });
     } finally { inserting.delete(`${id}:${key}`); schedule(id); }
   }
   async function pump(id) {
@@ -239,7 +284,10 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
         }
       }
       ok = true;
-    } catch (error) { errorText = message(error); uncertain = error?.code === 'ACP_REQUEST_TIMEOUT' || /connection closed|process exited|disposed/i.test(errorText); }
+    } catch (error) {
+      uncertain = isUnknownDeliveryOutcome(error);
+      errorText = uncertain ? unknownOutcomeNotice('prompt', error) : message(error);
+    }
     finally {
       try {
         store.change(id, next => {

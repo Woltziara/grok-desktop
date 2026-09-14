@@ -9,7 +9,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {fileURLToPath} from 'node:url';
-import {createSessionDelivery} from '../../electron/session-delivery.mjs';
+import {createSessionDelivery, notifySessionDelivery} from '../../electron/session-delivery.mjs';
 import {registerDeliveryIpc} from '../../electron/delivery-ipc.mjs';
 import {importAttachmentFile} from '../../electron/attachments.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url)),tmp=process.env.DESKTOP_DELIVERY_TEST_ROOT || fs.mkdtempSync(path.join(os.tmpdir(),'delivery-electron-'));
@@ -25,14 +25,23 @@ class Peer extends EventEmitter{
 }
 const ids=['delivery-session-A','delivery-session-B'],paths=Object.fromEntries(ids.map(id=>[id,path.join(tmp,id)]));for(const cwd of Object.values(paths))fs.mkdirSync(cwd,{recursive:true});
 const clients=Object.fromEntries(ids.map(id=>[id,new Peer(id,paths[id])])),ws={agent:clients[ids[0]],lastSessionId:ids[0],parkedAgents:new Map(ids.map(id=>[id,clients[id]]))};
-const gates=new Map(),blocked=new Map();let win,server;
+const gates=new Map(),blocked=new Map(),foreignEvents=[],windows=new Map();let win,server;
+function syncWindows(){
+  windows.set(1,{agent:ws.agent,lastSessionId:ws.lastSessionId,parkedAgents:ws.parkedAgents,disposed:false});
+  windows.set(2,{agent:clients[ids[1]],lastSessionId:ids[1],parkedAgents:new Map(),disposed:false});
+}
+syncWindows();
 const wait=async kind=>{if(gates.get(kind))await new Promise(resolve=>{blocked.set(kind,resolve);});};
-const service=createSessionDelivery(path.join(tmp,'outbox'),{notify:e=>win?.webContents.send('agent:delivery',e)});
+const service=createSessionDelivery(path.join(tmp,'outbox'),{notify:e=>notifySessionDelivery(e,windows.values(),(viewer,payload)=>{
+  if(viewer===windows.get(1))win?.webContents.send('agent:delivery',payload);
+  else foreignEvents.push(payload);
+})});
 const agentForSession=(w,id)=>w.agent?.sessionId===id?w.agent:w.parkedAgents.get(id);
 registerDeliveryIpc({handle(name,handler){ipcMain.handle(name,async(...args)=>{const result=await handler(...args);if(name==='agent:submit-delivery')await wait('receipt');return result;});}},{sessionFromEvent:()=>ws,agentForSession,delivery:()=>service});
 ipcMain.handle('agent:cancel',(_e,id)=>{service.bind(agentForSession(ws,id));return service.stop(id);});
 ipcMain.handle('attachments:import',async(_e,file,id)=>{const agent=agentForSession(ws,id);if(!agent)throw new Error('missing owner');await wait('import');return importAttachmentFile(file,{cwd:agent.cwd,sessionId:id});});
-ipcMain.handle('test:info',()=>paths);ipcMain.handle('test:switch',(_e,id)=>{ws.agent=clients[id];ws.lastSessionId=id;return true;});
+ipcMain.handle('test:info',()=>paths);ipcMain.handle('test:switch',(_e,id)=>{ws.agent=clients[id];ws.lastSessionId=id;syncWindows();return true;});
+ipcMain.handle('test:foreign-events',()=>foreignEvents);
 ipcMain.handle('test:calls',()=>Object.fromEntries(ids.map(id=>[id,clients[id].calls])));ipcMain.handle('test:complete',(_e,id)=>{clients[id].complete?.();return true;});
 ipcMain.handle('test:delay',(_e,kind)=>{gates.set(kind,true);return true;});ipcMain.handle('test:release',(_e,kind)=>{gates.delete(kind);blocked.get(kind)?.();blocked.delete(kind);return true;});ipcMain.handle('test:pending',()=>[...blocked.keys()]);
 const originalFile=path.join(tmp,'source-note.md');fs.writeFileSync(originalFile,'original attachment text');ipcMain.handle('test:fixture-path',()=>originalFile);
@@ -84,6 +93,18 @@ app.whenReady().then(async()=>{
     const bytes=await page.evaluate(async()=>{const draft=window.deliveryHarness.draft('delivery-session-A');return (await window.deliveryHarness.blob(draft.files.find(f=>f.kind==='image').blobId)).size;});assert.ok(bytes>1000);
     await page.reload();await page.getByText('source-note.md',{exact:true}).waitFor();await page.waitForFunction(()=>document.querySelectorAll('.composer-images img').length>0);
     checks.push('large original image Blob plus native file and draft survive renderer reload');
+    const huge='Qk'.repeat(12000);
+    foreignEvents.length=0;
+    await page.evaluate(async data=>{
+      const paths=await window.deliveryTest.info();
+      await window.grokDesktop.submitDelivery({id:'cross-window-image',cwd:paths['delivery-session-A'],sessionId:'delivery-session-A',text:'picture kept on this conversation',images:[{data,mimeType:'image/png',id:'huge',name:'huge.png'}],mode:'auto'});
+    },huge);
+    await page.waitForFunction(async()=>(await window.deliveryTest.calls())['delivery-session-A'].some(c=>c.text==='picture kept on this conversation'));
+    const leaked=JSON.stringify(await page.evaluate(()=>window.deliveryTest.foreignEvents()));
+    assert.equal(leaked.includes(huge),false);
+    assert.equal(JSON.parse(leaked).some(event=>event.sessionId==='delivery-session-A'),false);
+    await page.evaluate(()=>window.deliveryTest.complete('delivery-session-A'));
+    checks.push('second window never receives the other conversation\'s original image bytes');
     // Slow encoding belongs to the original mounted composer, even after A -> B.
     await page.evaluate(()=>{const original=window.createImageBitmap;window.encodeReached=false;window.createImageBitmap=async(...args)=>{window.encodeReached=true;await new Promise(r=>window.releaseEncoding=r);return original(...args);};});
     await composer.fill('encoded request A');await composer.press('Enter');await page.waitForFunction(()=>window.encodeReached);

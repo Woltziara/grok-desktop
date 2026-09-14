@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {exportContinuation,validateContinuation,stageContinuation,previewContinuation,acceptContinuation,rollbackContinuation,continuationStatus,safeMaterialPath,assertContinuationSettled} from '../electron/continuation-pack.mjs';
+import {exportContinuation,validateContinuation,stageContinuation,previewContinuation,acceptContinuation,rollbackContinuation,continuationStatus,safeMaterialPath,assertContinuationSettled,isNativeSessionPath} from '../electron/continuation-pack.mjs';
 import {encodeSessionCwd,loadSessionOpenState} from '../electron/sessions.mjs';import {createSessionDelivery} from '../electron/session-delivery.mjs';import {EventEmitter} from 'node:events';import {continuationRules} from '../electron/continuation-rules.mjs';import {pairPeer,alignPeer,copyAuthToPeer,peerAccountSummary,exportApplicationCandidate} from '../electron/peer-sync.mjs';import {sourceIdentity} from '../scripts/write-build-identity.mjs';
 const id='carried-session-0001';
 function setup(t){const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'continuation-'));t.after(()=>fs.rmSync(tmp,{recursive:true,force:true}));const a={home:path.join(tmp,'ahome'),userData:path.join(tmp,'aui'),cwd:path.join(tmp,'aproject'),sessionId:id},b={home:path.join(tmp,'bhome'),userData:path.join(tmp,'bui'),cwd:path.join(tmp,'bproject')};for(const c of [a,b]){fs.mkdirSync(c.cwd,{recursive:true});fs.mkdirSync(c.userData,{recursive:true});}const native=c=>path.join(c.home,'sessions',encodeSessionCwd(c.cwd),id);fs.mkdirSync(path.join(native(a),'attachments'),{recursive:true});fs.writeFileSync(path.join(native(a),'summary.json'),JSON.stringify({info:{cwd:a.cwd,id},generated_title:'合成对话',updated_at:'2026-09-14T00:00:00Z'}));const history=JSON.stringify({update:{sessionUpdate:'user_message_chunk',content:{type:'text',text:'原话不改写 '+path.join(native(a),'attachments/document.pdf')}},timestamp:'2026-09-14T00:00:00Z'})+'\n';fs.writeFileSync(path.join(native(a),'updates.jsonl'),history);fs.writeFileSync(path.join(native(a),'chat_history.jsonl'),history);fs.writeFileSync(path.join(native(a),'attachments/document.pdf'),'synthetic bytes, not a PDF parser fixture');fs.writeFileSync(path.join(a.cwd,'result.html'),'<h1>kept material</h1>');return {tmp,a,b,native,history};}
@@ -18,3 +18,26 @@ test('legacy peer functions perform no credential or remote mutation and candida
 test('source identity depends on source bytes rather than file modification time',t=>{const {tmp}=setup(t),root=path.join(tmp,'identity');fs.mkdirSync(root);fs.writeFileSync(path.join(root,'package.json'),JSON.stringify({version:'0.0.1'}));const first=sourceIdentity(root);fs.utimesSync(path.join(root,'package.json'),0,0);assert.equal(sourceIdentity(root).sourceDigest,first.sourceDigest);fs.writeFileSync(path.join(root,'package.json'),JSON.stringify({version:'0.0.2'}));assert.notEqual(sourceIdentity(root).sourceDigest,first.sourceDigest);});
 
 test('a partially installed token cannot be accepted again to overwrite its original backup',t=>{const {a,b}=setup(t);const p=stageContinuation({...b,bundle:exportContinuation(a)});assert.throws(()=>acceptContinuation({...b,...p,choice:'incoming'},{afterWrite(){throw Error('stop');}}));const fresh=previewContinuation({...b,token:p.token});assert.throws(()=>acceptContinuation({...b,...fresh,choice:'incoming'}),/覆盖备份/);});
+test('native export keeps conversation attachments and documented session files, not session-level MCP stores',t=>{
+  const {a,b,native}=setup(t);
+  const mcp=path.join(native(a),'mcp','preview-server');
+  fs.mkdirSync(mcp,{recursive:true});
+  fs.writeFileSync(path.join(mcp,'session-token.json'),JSON.stringify({token:'synthetic-not-a-real-secret',kind:'access'}));
+  fs.writeFileSync(path.join(mcp,'cookies.dat'),'SYNTHETIC_COOKIE_JAR');
+  fs.writeFileSync(path.join(mcp,'tool-output.txt'),'legitimate looking tool bytes');
+  fs.writeFileSync(path.join(native(a),'system_prompt.txt'),'synthetic prompt');
+  fs.writeFileSync(path.join(native(a),'tool_definitions.json'),'[]');
+  assert.equal(isNativeSessionPath('mcp/session-token.json'),false);
+  assert.equal(isNativeSessionPath('attachments/document.pdf'),true);
+  const bundle=exportContinuation(a);
+  const names=bundle.native.map(r=>r.path);
+  assert.ok(names.includes('attachments/document.pdf'));
+  assert.ok(names.includes('system_prompt.txt'));
+  assert.equal(names.some(name=>name==='mcp'||name.startsWith('mcp/')),false);
+  assert.equal(JSON.stringify(bundle).includes('synthetic-not-a-real-secret'),false);
+  assert.equal(JSON.stringify(bundle).includes('SYNTHETIC_COOKIE_JAR'),false);
+  incoming(b,bundle);
+  assert.equal(fs.existsSync(path.join(native(b),'attachments/document.pdf')),true);
+  assert.equal(fs.existsSync(path.join(native(b),'mcp')),false);
+  assert.equal(fs.readFileSync(path.join(native(b),'system_prompt.txt'),'utf8'),'synthetic prompt');
+});

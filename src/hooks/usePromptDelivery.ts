@@ -67,7 +67,10 @@ export function usePromptDelivery(opts: {
     const event = raw as DeliveryEvent;
     if (!visible(event.sessionId)) return;
     const v = view.current;
-    applyState(event.state);
+    const sessionId = event.sessionId;
+    void window.grokDesktop.listOutbox(sessionId).then(state => {
+      if (visible(sessionId)) applyState(state);
+    }).catch(error => { if (visible(sessionId)) v.setError(String(error?.message || error)); });
     const row = event.row, key = row ? `${event.sessionId}:${row.attemptId}:${event.method}` : "";
     if (event.type === "started" && row && !seen.current.has(key)) {
       seen.current.add(key);

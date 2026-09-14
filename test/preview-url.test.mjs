@@ -262,6 +262,18 @@ test("desktop-preview skill names the Preview MCP tools", () => {
   assert.match(skill, /second browser/i);
 });
 
+test("web-pro skill requires bound Preview and forbids simulated Pro output", () => {
+  const skill = fs.readFileSync(
+    new URL("../electron/web-pro/SKILL.md", import.meta.url),
+    "utf8",
+  );
+  assert.match(skill, /chatgpt.com/);
+  assert.match(skill, /desktop-preview__preview_open/);
+  assert.match(skill, /Restart agent/);
+  assert.match(skill, /Do not write the answer yourself/);
+  assert.match(skill, /cloakbrowser/i);
+});
+
 test("user capture caption names the URL", () => {
   assert.equal(
     formatPreviewCapturePrompt({ url: "http://localhost:5173/app" }),

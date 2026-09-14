@@ -1,6 +1,6 @@
 import { assertContinuationSettled } from './continuation-pack.mjs';
 import { registerKnowledgeTransferIpc } from "./knowledge-transfer-ipc.mjs";
-import { createSessionDelivery } from "./session-delivery.mjs";
+import { createSessionDelivery, notifySessionDelivery } from "./session-delivery.mjs";
 import { registerDeliveryIpc } from "./delivery-ipc.mjs";
 import { resolveMovedSessionCwd } from "./session-move.mjs";
 import { moveSessionFiles, withSessionMove, movableSessionClients, readSessionMoves, recoverSessionMoves } from "./session-move.mjs";
@@ -108,6 +108,7 @@ import {
 import { exportApplicationCandidate } from "./peer-sync.mjs";
 import { readBuildIdentity } from "./build-identity.mjs";
 import { registerContinuationIpc } from "./continuation-ipc.mjs";
+import { registerWebProIpc } from "./web-pro-ipc.mjs";
 import { remainingFromBilling } from "../shared/billing-display.mjs";
 import {
   exportFilename,
@@ -846,7 +847,7 @@ function createWindow(opts = {}) {
 let sessionDelivery;
 function delivery() {
   return sessionDelivery ||= createSessionDelivery(path.join(app.getPath("userData"), "outbox"), {
-    notify: event => { for (const ws of windowSessions.values()) send(ws, "agent:delivery", event); },
+    notify: event => notifySessionDelivery(event, windowSessions.values(), (ws, payload) => send(ws, "agent:delivery", payload)),
     beforeCancel: client => {
       for (const ws of windowSessions.values()) {
         if (ws.agent === client || ws.parkedAgents?.get(client.sessionId) === client) clearPendingPermissions(ws, client.sessionId);
@@ -859,6 +860,7 @@ function delivery() {
 function registerIpc() {
   registerKnowledgeTransferIpc(ipcMain, {dialog, windowFromEvent: e => BrowserWindow.fromWebContents(e.sender)});
   registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
+  registerWebProIpc(ipcMain, { userData: () => app.getPath("userData"), windowFromEvent: e => BrowserWindow.fromWebContents(e.sender) });
   registerContinuationIpc(ipcMain, {
     home:grokHomeDir, userData:()=>app.getPath("userData"), dialog,
     windowFromEvent:e=>BrowserWindow.fromWebContents(e.sender),
@@ -2268,15 +2270,32 @@ function registerIpc() {
 // Unpackaged (npm run dev) skips the lock so it does not join an install.
 wireWorktreePathGate();
 configureDesktopInstance(app);
-const isPrimaryInstance = isPrimaryDesktopInstance(app);
+const printInfo = app.commandLine.hasSwitch("print-info");
+const isPrimaryInstance = printInfo || isPrimaryDesktopInstance(app);
 if (!isPrimaryInstance) {
   app.quit();
-} else {
+} else if (!printInfo) {
   wireSecondInstance(app, () => newWindowFromMenu());
 }
 
 app.whenReady().then(() => {
   if (!isPrimaryInstance) return;
+  if (printInfo) {
+    process.stdout.write(JSON.stringify({
+      version: app.getVersion(),
+      buildIdentity: readBuildIdentity(app.getAppPath(), app.getVersion()),
+      pid: process.pid,
+      executable: process.execPath,
+      appPath: app.getAppPath(),
+      userData: app.getPath("userData"),
+      sessionData: app.getPath("sessionData"),
+      platform: process.platform,
+      grokBinary: resolveGrokBinary(),
+      grokHome: grokHomeDir(),
+    }) + "\n");
+    app.quit();
+    return;
+  }
   setDesktopStateLoader(loadState);
   setAllowPrerelease(Boolean(loadState().allowPrerelease));
   registerIpc();

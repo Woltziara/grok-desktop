@@ -6,4 +6,5 @@ contextBridge.exposeInMainWorld('deliveryTest',{
   calls:()=>ipcRenderer.invoke('test:calls'), complete:id=>ipcRenderer.invoke('test:complete',id),
   delay:kind=>ipcRenderer.invoke('test:delay',kind), release:kind=>ipcRenderer.invoke('test:release',kind),
   pending:()=>ipcRenderer.invoke('test:pending'), fixturePath:()=>ipcRenderer.invoke('test:fixture-path'),
+  foreignEvents:()=>ipcRenderer.invoke('test:foreign-events'),
 });
