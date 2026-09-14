@@ -23,6 +23,7 @@ import { expandUserPath, resolveProjectPath } from "./path-safety.mjs";
 import { readFileForAcp } from "./fs-content.mjs";
 import { sessionsRootForCwd } from "./sessions.mjs";
 import { extractChunkText } from "../shared/session-timeline.mjs";
+import { issuePreviewScope, revokePreviewScope } from "./preview-ownership.mjs";
 import { desktopPreviewMcpServers } from "./preview-mcp.mjs";
 import { PREVIEW_SESSION_RULE } from "./preview-mcp-protocol.mjs";
 import {
@@ -508,7 +509,15 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   _previewMcpPayload() {
-    const servers = desktopPreviewMcpServers(this.windowId);
+    revokePreviewScope(this._previewScopeId);
+    const connection = this.proc;
+    this._previewSessionReady = false;
+    this._previewScopeId = issuePreviewScope({
+      windowId: this.windowId,
+      getSessionId: () => this._previewSessionReady ? this.sessionId : null,
+      isLive: () => Boolean(connection && this.proc === connection && !this._discardUpdates),
+    });
+    const servers = desktopPreviewMcpServers(this.windowId, this._previewScopeId);
     debugLog("preview", "session-mcp", {
       count: servers.length,
       names: servers.map((s) => s.name),
@@ -607,6 +616,7 @@ export class GrokAcpClient extends EventEmitter {
       { timeoutMs: LOAD_TIMEOUT_MS },
     );
     this.sessionId = session.sessionId;
+    this._previewSessionReady = true;
     this.allowWritesThisSession = false;
     this.emit("writes-session", false);
     this._rememberModels(session);
@@ -654,6 +664,7 @@ export class GrokAcpClient extends EventEmitter {
 
     this.sessionId =
       result?.sessionId || result?._meta?.sessionId || sessionId;
+    this._previewSessionReady = true;
     this.allowWritesThisSession = false;
     this.emit("writes-session", false);
     this._rememberModels(result);
@@ -1242,7 +1253,8 @@ export class GrokAcpClient extends EventEmitter {
     const attempts = sessionForkAttempts({
       sessionId: this.sessionId,
       cwd: this.cwd,
-      mcpServers: this._previewMcpPayload(),
+      // A fork receives its own Preview descriptor when it is loaded.
+      mcpServers: [],
     });
     const misses = [];
     for (const attempt of attempts) {
@@ -2196,6 +2208,8 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   async dispose() {
+    revokePreviewScope(this._previewScopeId);
+    this._previewScopeId = "";
     if (this._activeTurn) this._activeTurn.cancelled = true;
     this._discardUpdates = true;
     this._rejectAllPending(new Error("Agent disposed"));

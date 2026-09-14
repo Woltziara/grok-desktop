@@ -384,6 +384,7 @@ export default function App() {
     editQueued,
   } = usePromptDelivery({
     project,
+    sessionIdRef,
     conn,
     busyRef,
     openingRef,

@@ -49,6 +49,9 @@ export async function handlePreviewMcpMessage(msg, context = {}) {
           ...req,
           owner: context.owner || null,
           ownerStamped: Boolean(context.ownerStamped),
+          ownerSessionId: context.ownerSessionId,
+          scope: context.scope,
+          validateOwner: context.validateOwner,
         }),
       );
       return { jsonrpc: "2.0", id, result };

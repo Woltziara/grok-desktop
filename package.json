@@ -23,7 +23,8 @@
     "test": "node --experimental-strip-types --test test/**/*.test.mjs",
     "test:acp": "node --test test/acp-rpc.test.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "test:preview": "node scripts/test-preview.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

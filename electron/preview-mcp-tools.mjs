@@ -164,6 +164,8 @@ export const SCREENSHOT_DISABLED_TEXT =
   "preview_screenshot is disabled (viewport JPEGs stay in context). Use preview_snapshot to read the page. The user can already see the Preview window.";
 
 /** MCP header binding a Preview request to the owning chat BrowserWindow. */
+export const PREVIEW_SCOPE_HEADER = "X-Grok-Desktop-Scope";
+
 export const PREVIEW_OWNER_HEADER = "X-Grok-Desktop-Window";
 
 export function previewOwnerHeaders(windowId) {
@@ -186,7 +188,7 @@ export function previewOwnerIdFromHeaders(headers) {
     ([key]) => key.toLowerCase() === PREVIEW_OWNER_HEADER.toLowerCase(),
   );
   const raw = Array.isArray(entry?.[1]) ? entry[1][0] : entry?.[1];
-  const id = Number.parseInt(String(raw || ""), 10);
+  const id = /^\d+$/.test(String(raw || "")) ? Number(raw) : NaN;
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
@@ -194,7 +196,7 @@ export function previewOwnerIdFromHeaders(headers) {
  * @param {{ url?: string, token?: string }} api
  * @returns {object[]}
  */
-export function previewMcpHttpServers(api, windowId) {
+export function previewMcpHttpServers(api, windowId, scopeId = "") {
   const url = String(api?.url || "").replace(/\/$/, "");
   const token = String(api?.token || "");
   if (!url || !token) return [];
@@ -206,6 +208,7 @@ export function previewMcpHttpServers(api, windowId) {
       headers: [
         { name: "Authorization", value: `Bearer ${token}` },
         ...previewOwnerHeaders(windowId),
+        ...(scopeId ? [{ name: PREVIEW_SCOPE_HEADER, value: scopeId }] : []),
       ],
     },
   ];

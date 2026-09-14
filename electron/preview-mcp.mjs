@@ -9,8 +9,8 @@ import { previewMcpHttpServers } from "./preview-mcp-tools.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_MARKER = "managed-by: grok-desktop-preview";
 
-export function desktopPreviewMcpServers(windowId) {
-  return previewMcpHttpServers(previewApiAddress(), windowId);
+export function desktopPreviewMcpServers(windowId, scopeId = "") {
+  return previewMcpHttpServers(previewApiAddress(), windowId, scopeId);
 }
 
 /** Keep only the Desktop-managed copy current; never overwrite a user copy. */

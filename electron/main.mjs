@@ -181,6 +181,7 @@ import {
   applyPreviewTheme,
   getPreviewWindow,
   openPreviewWindow,
+  requestPreviewOpen,
   registerPreviewIpc,
 } from "./preview-window.mjs";
 import { previewApiAddress, startPreviewApi } from "./preview-api.mjs";
@@ -377,7 +378,7 @@ function rememberProjectSession(cwd, sessionId) {
 function openPreviewFromMenu() {
   const ws = focusedSession();
   const owner = ws?.win && !ws.win.isDestroyed() ? ws.win : null;
-  return openPreviewWindow({ owner });
+  return requestPreviewOpen(owner, ws?.agent?.sessionId);
 }
 
 function openSettingsFromMenu() {
@@ -2193,13 +2194,15 @@ function registerIpc() {
       const ws = sessionFromEvent(e);
       return ws?.win && !ws.win.isDestroyed() ? ws.win : null;
     },
+    getOwnerSessionId: (win) => windowSessions.get(win?.id)?.agent?.sessionId || null,
     ownerHasProject: (win) => {
       const ws = windowSessions.get(win.id);
       return Boolean(ws?.agent?.cwd || ws?.lastCwd);
     },
     broadcast: (payload) => {
       for (const ws of windowSessions.values()) {
-        send(ws, "preview:changed", payload);
+        send(ws, "preview:changed", payload.ownerSessionId === ws.agent?.sessionId
+          ? payload : { open: false, url: "", title: "", viewport: payload.viewport, loading: false, ownedElsewhere: payload.open });
       }
     },
   });

@@ -47,6 +47,7 @@ function visiblePromptText(payload: Pick<DeliverPayload, "text" | "timelineText"
  */
 export function usePromptDelivery(opts: {
   project: string | null;
+  sessionIdRef: MutableRefObject<string | null>;
   conn: ConnState;
   busyRef: MutableRefObject<boolean>;
   openingRef: MutableRefObject<boolean>;
@@ -62,6 +63,7 @@ export function usePromptDelivery(opts: {
 }) {
   const {
     project,
+    sessionIdRef,
     conn,
     busyRef,
     openingRef,
@@ -450,10 +452,15 @@ export function usePromptDelivery(opts: {
 
   const submitPreviewCapture = useCallback(
     (payload: {
+      sessionId?: unknown;
       data?: unknown;
       mimeType?: unknown;
       text?: unknown;
     }) => {
+      if (!payload.sessionId || payload.sessionId !== sessionIdRef.current || openingRef.current) {
+        setError("截图属于另一段对话，未发送。请返回打开网页的原对话重试。");
+        return;
+      }
       const parsed = previewCaptureToSubmit(payload);
       if (!parsed.ok) {
         setError(parsed.error);
@@ -463,7 +470,7 @@ export function usePromptDelivery(opts: {
         if (!ok) setError(previewCaptureRefuseError(project));
       });
     },
-    [project, submitFromComposer, setError],
+    [project, submitFromComposer, setError, sessionIdRef, openingRef],
   );
 
   useEffect(() => {

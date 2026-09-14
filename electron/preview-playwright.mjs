@@ -122,23 +122,13 @@ export async function pinGuestPage(known, isGuest) {
  * Re-bind if the pinned page died or navigated away from the guest.
  * @param {{ getURL?: () => string } | null} wc
  */
+const guestBindings = new WeakMap();
+export function bindGuestWebContents(wc, page) { guestBindings.set(wc, page); }
 export async function ensureGuestPage(wc) {
-  const live = getGuestPage();
-  const want = String(wc?.getURL?.() || "");
-  if (live) {
-    const have = live.url();
-    if (!want || want === "about:blank" || have === want) return live;
-    if (have === "about:blank") return live;
-  }
-  if (!want) return live;
-  const match = listPlaywrightPages().find(
-    (p) => !p.isClosed() && !looksLikePreviewChrome(p) && p.url() === want,
-  );
-  if (match) {
-    bindGuestPage(match);
-    return match;
-  }
-  return live;
+  const bound = wc && guestBindings.get(wc);
+  if (bound && !bound.isClosed()) { bindGuestPage(bound); return bound; }
+  guestPage = null;
+  return null;
 }
 
 /** @param {import('playwright-core').Page} page */
@@ -274,8 +264,8 @@ async function fillLocator(locator, value) {
 /**
  * @param {Record<string, unknown>} act
  */
-export async function runGuestAction(act) {
-  const page = await requireGuest();
+export async function runGuestAction(act, expectedPage) {
+  const page = expectedPage || await requireGuest();
   const action = String(act?.action || "click").toLowerCase();
   const spec = previewLocatorSpec(act);
   const x = Number(act?.x);

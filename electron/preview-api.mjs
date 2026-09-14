@@ -4,6 +4,8 @@
  */
 import http from "node:http";
 import crypto from "node:crypto";
+import { PREVIEW_SCOPE_HEADER, resolvePreviewScope, clearPreviewScopes } from "./preview-ownership.mjs";
+import { previewOwnerIdFromHeaders } from "./preview-mcp-tools.mjs";
 
 /** @type {typeof import("./preview-window.mjs") | null} */
 let previewWinApi = null;
@@ -74,7 +76,7 @@ export function previewRequestOwner({ owner = null, ownerStamped = false } = {},
  * @param {import('electron').BrowserWindow | null} [req.owner]
  * @param {boolean} [req.ownerStamped]
  */
-export async function dispatchPreviewApi(req) {
+async function dispatchPreviewRequest(req) {
   const method = String(req.method || "GET").toUpperCase();
   const path = String(req.path || "/");
   const body = req.body && typeof req.body === "object" ? req.body : {};
@@ -86,7 +88,7 @@ export async function dispatchPreviewApi(req) {
   }
 
   const {
-    claimPreviewOwner,
+    assertPreviewOwner,
     closePreviewWindow,
     navigatePreview,
     openPreviewWindow,
@@ -98,11 +100,18 @@ export async function dispatchPreviewApi(req) {
     VIEWPORTS,
   } = await previewWindowApi();
 
-  // A stamped request is bound to its agent window. Never substitute focus for
-  // a stale/invalid stamped id; only old un-stamped open/navigate may do that.
-  if (req.owner) claimPreviewOwner(req.owner);
-  const openOwner = previewRequestOwner(req, getOwner);
-
+  if (method === "GET" && path === "/health") return { ok: true };
+  // No focus fallback: a BrowserWindow alone is not a conversation identity.
+  const owner = req.owner;
+  const sessionId = req.ownerSessionId;
+  if (!owner || owner.isDestroyed() || !sessionId) {
+    throw Object.assign(new Error("Preview requires a live conversation owner"), { statusCode: 403 });
+  }
+  req.validateOwner?.();
+  if (path !== "/open") {
+    if (req.scope && !req.scope.leaseId) throw new Error("Call preview_open from this conversation first.");
+    assertPreviewOwner(owner, sessionId, req.scope?.leaseId);
+  }
   if (method === "GET" && path === "/health") {
     return { ok: true, ...previewPublicState() };
   }
@@ -111,7 +120,10 @@ export async function dispatchPreviewApi(req) {
   }
   if (method === "POST" && path === "/open") {
     const url = typeof body.url === "string" ? body.url : "";
-    return openPreviewWindow({ owner: openOwner, url });
+    const result = await openPreviewWindow({ owner, sessionId, url });
+    req.validateOwner?.();
+    if (req.scope) req.scope.leaseId = result.leaseId;
+    return result;
   }
   if (method === "POST" && path === "/close") {
     return { ok: closePreviewWindow(), ...previewPublicState() };
@@ -119,7 +131,7 @@ export async function dispatchPreviewApi(req) {
   if (method === "POST" && path === "/navigate") {
     const url = typeof body.url === "string" ? body.url : "";
     if (!previewPublicState().open) {
-      return openPreviewWindow({ owner: openOwner, url });
+      throw new Error("Preview is closed. Call preview_open first.");
     }
     return navigatePreview(url);
   }
@@ -204,23 +216,32 @@ export async function dispatchPreviewApi(req) {
   throw err;
 }
 
-function readBody(req) {
-  return new Promise((resolve) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        resolve({});
-      }
-    });
+let operationTail = Promise.resolve();
+export function dispatchPreviewApi(req) {
+  const leaseId = req.scope?.leaseId;
+  const operation = operationTail.then(async () => {
+    if (req.scope && req.path !== "/open" && req.scope.leaseId !== leaseId) {
+      throw new Error("Preview request expired while another operation opened the page.");
+    }
+    return dispatchPreviewRequest(req);
   });
+  operationTail = operation.catch(() => {});
+  return operation;
+}
+
+function requestContext(headers, { allowPending = false } = {}) {
+  const windowId = previewOwnerIdFromHeaders(headers);
+  const scopeId = headers[PREVIEW_SCOPE_HEADER.toLowerCase()];
+  const scope = resolvePreviewScope(scopeId, windowId, { allowPending });
+  const owner = windowById(windowId);
+  const ownerSessionId = scope.getSessionId();
+  const validateOwner = () => {
+    if (resolvePreviewScope(scopeId, windowId, { allowPending }) !== scope || scope.getSessionId() !== ownerSessionId || !owner || owner.isDestroyed()) {
+      throw new Error("Preview conversation changed or closed");
+    }
+  };
+  validateOwner();
+  return { owner, ownerSessionId, scope, ownerStamped: true, validateOwner };
 }
 
 async function handleMcpHttp(req, res, rawBody) {
@@ -238,12 +259,8 @@ async function handleMcpHttp(req, res, rawBody) {
     res.end(JSON.stringify({ error: "invalid JSON" }));
     return;
   }
-  const { previewOwnerHeaderStamped, previewOwnerIdFromHeaders } =
-    await import("./preview-mcp-tools.mjs");
-  const ownerStamped = previewOwnerHeaderStamped(req.headers);
-  const ownerId = previewOwnerIdFromHeaders(req.headers);
-  const owner = ownerId == null ? null : windowById(ownerId);
-  const reply = await handlePreviewMcpMessage(msg, { owner, ownerStamped });
+  const context = requestContext(req.headers, { allowPending: msg.method !== "tools/call" });
+  const reply = await handlePreviewMcpMessage(msg, context);
   if (!reply) {
     res.writeHead(202);
     res.end();
@@ -274,6 +291,7 @@ export function startPreviewApi(opts = {}) {
   }
 
   server = http.createServer(async (req, res) => {
+    if (req.headers.origin) { res.writeHead(403); res.end("Browser origins are not accepted"); return; }
     const auth = String(req.headers.authorization || "");
     if (auth !== `Bearer ${token}`) {
       res.writeHead(401, { "content-type": "application/json" });
@@ -282,7 +300,12 @@ export function startPreviewApi(opts = {}) {
     }
     const url = new URL(req.url || "/", "http://127.0.0.1");
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > 8_000_000) { res.writeHead(413); res.end("Request too large"); req.destroy(); return; }
+      chunks.push(c);
+    });
     req.on("end", async () => {
       const raw = Buffer.concat(chunks).toString("utf8");
       if (url.pathname === "/mcp") {
@@ -309,6 +332,7 @@ export function startPreviewApi(opts = {}) {
           method: req.method,
           path: url.pathname,
           body,
+          ...requestContext(req.headers),
         });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(result));
@@ -337,6 +361,7 @@ export function stopPreviewApi() {
   } catch {
     /* ignore */
   }
+  clearPreviewScopes();
   server = null;
   port = 0;
   token = "";

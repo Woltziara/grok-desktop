@@ -1,3 +1,4 @@
+import { createPreviewOwnership } from "./preview-ownership.mjs";
 /**
  * Detachable Preview window (separate BrowserWindow + WebContentsView).
  * Lives on its own screen; not a column in the main GUI.
@@ -7,6 +8,7 @@
  * Do not point this partition at another browser's profile.
  */
 import {
+  dialog,
   BrowserWindow,
   WebContentsView,
   ipcMain,
@@ -34,6 +36,7 @@ import {
 import {
   bindPlaywrightNetwork,
   ensureGuestPage,
+  bindGuestWebContents,
   getGuestPage,
   isPlaywrightGuestLive,
   pinGuestPage,
@@ -73,6 +76,9 @@ let broadcast = null;
 /** Chat window that opened Preview — user screenshots go here, not MCP. */
 /** @type {import('electron').BrowserWindow | null} */
 let ownerWin = null;
+const ownership = createPreviewOwnership();
+let ownerSessionIdForWindow = () => null;
+let openingPreview = null;
 /** @type {((win: import('electron').BrowserWindow) => boolean) | null} */
 let ownerHasProject = null;
 
@@ -198,6 +204,8 @@ function emitChrome() {
 
 export function previewPublicState() {
   return {
+    leaseId: ownership.get()?.leaseId || null,
+    ownerSessionId: ownership.get()?.sessionId || null,
     open: isLive(),
     url: lastUrl,
     title: lastTitle,
@@ -431,10 +439,12 @@ async function loadGuest(href) {
   if (!wc) throw new Error("Preview is not open");
   const parsed = normalizePreviewUrl(href);
   if (!parsed.ok) throw new Error(parsed.error);
+  const guard = lifetimeGuard();
   lastUrl = parsed.href;
   loading = true;
   emitChrome();
   await wc.loadURL(parsed.href);
+  guard();
   // A first real navigation is the earliest safe point for device emulation.
   applyViewport();
 }
@@ -454,25 +464,30 @@ function attachGuestHandlers(wc) {
     }
   });
   wc.on("page-title-updated", (_e, title) => {
+    if (guestWc() !== wc) return;
     lastTitle = title || "";
     if (isLive()) previewWin.setTitle(lastTitle ? `${lastTitle} · Preview` : "Preview · Grok");
     emitChrome();
   });
   wc.on("did-start-loading", () => {
+    if (guestWc() !== wc) return;
     loading = true;
     emitChrome();
   });
   wc.on("did-stop-loading", () => {
+    if (guestWc() !== wc) return;
     loading = false;
     lastUrl = wc.getURL() || lastUrl;
     lastTitle = wc.getTitle() || lastTitle;
     emitChrome();
   });
   wc.on("did-navigate", (_e, url) => {
+    if (guestWc() !== wc) return;
     lastUrl = url || lastUrl;
     emitChrome();
   });
   wc.on("did-navigate-in-page", (_e, url) => {
+    if (guestWc() !== wc) return;
     lastUrl = url || lastUrl;
     emitChrome();
   });
@@ -511,14 +526,50 @@ function ownerWindow() {
   return null;
 }
 
-/** Bind screenshots and future MCP calls to an explicit live chat window. */
-export function claimPreviewOwner(win) {
-  if (win && !win.isDestroyed()) ownerWin = win;
+export function assertPreviewOwner(win, sessionId, leaseId) {
+  return ownership.assert(win, sessionId, leaseId);
+}
+
+function lifetimeGuard() {
+  const lease = ownership.get();
+  const win = previewWin;
+  const wc = guestWc();
+  return () => {
+    if (!lease || ownership.get() !== lease || previewWin !== win || !isLive() || (wc && guestWc() !== wc)) {
+      throw new Error("Preview closed or changed while the operation was running");
+    }
+  };
+}
+
+/** Only an explicit native user action may transfer an already owned Preview. */
+export async function requestPreviewOpen(owner, sessionId, url = "") {
+  if (!sessionId || ownerSessionIdForWindow(owner) !== sessionId) throw new Error("请先开始一段对话，再打开预览。");
+  const previous = ownership.get();
+  if (previous && (previous.windowId !== owner?.id || previous.sessionId !== sessionId)) {
+    const choice = await dialog.showMessageBox(owner, { type: "question", title: "转交网页预览", message: "网页目前属于另一段对话。关闭当前预览并转交给这段对话？本站登录会保留。", buttons: ["保留原归属", "转交"], defaultId: 0, cancelId: 0 });
+    if (choice.response !== 1) return previewPublicState();
+    if (ownerSessionIdForWindow(owner) !== sessionId) throw new Error("对话已切换，请重新打开预览。");
+    if (ownership.get() !== previous) throw new Error("预览已变化，请重新打开。");
+    closePreviewWindow();
+  }
+  return openPreviewWindow({ owner, sessionId, url });
 }
 
 export async function openPreviewWindow(opts = {}) {
   const owner = opts.owner || null;
-  claimPreviewOwner(owner);
+  const sessionId = opts.sessionId || ownerSessionIdForWindow(owner);
+  if (openingPreview) await openingPreview.catch(() => {});
+  ownership.claim(owner, sessionId);
+  ownerWin = owner;
+  const opening = openOwnedPreview(opts);
+  openingPreview = opening;
+  try { return await opening; }
+  catch (err) { if (ownerWin === owner && ownership.get()?.sessionId === sessionId) closePreviewWindow(); throw err; }
+  finally { if (openingPreview === opening) openingPreview = null; }
+}
+
+async function openOwnedPreview(opts) {
+  const owner = opts.owner;
   const state = readState?.() || {};
   viewportId = VIEWPORTS[state.previewViewport] ? state.previewViewport : "fluid";
 
@@ -541,6 +592,7 @@ export async function openPreviewWindow(opts = {}) {
       },
     });
     previewWin = win;
+    const guard = lifetimeGuard();
 
     const persistSoon = debounce(persistNow, 250);
     win.on("resize", () => {
@@ -549,6 +601,7 @@ export async function openPreviewWindow(opts = {}) {
     });
     win.on("move", persistSoon);
     win.on("closed", () => {
+      if (previewWin !== win) return;
       writeCrashLog("preview", "window-closed");
       persistNow();
       detachNetwork();
@@ -557,6 +610,10 @@ export async function openPreviewWindow(opts = {}) {
         clearTimeout(netTimer);
         netTimer = null;
       }
+      if (previewWin !== win) return;
+      ownership.release();
+      const retiredGuest = guestView?.webContents;
+      if (retiredGuest && !retiredGuest.isDestroyed()) retiredGuest.close({ waitForBeforeUnload: false });
       previewWin = null;
       guestView = null;
       ownerWin = null;
@@ -578,6 +635,7 @@ export async function openPreviewWindow(opts = {}) {
     try {
       writeCrashLog("preview", "chrome-load");
       await win.loadFile(chromeFile, { query: { theme: themeFromState() } });
+      guard();
       // HWND must exist before WebContentsView attach — add-then-show can AV.
       win.show();
       win.focus();
@@ -596,14 +654,19 @@ export async function openPreviewWindow(opts = {}) {
         error: err?.message || String(err),
       });
     }
+    guard();
     guestView = createGuest();
     writeCrashLog("preview", "guest-created");
     win.contentView.addChildView(guestView);
     layoutGuest();
     writeCrashLog("preview", "guest-attached");
+    const currentGuest = guestView.webContents;
+    // Establish a real blank document before executeJavaScript can wait on it.
+    await currentGuest.loadURL("about:blank");
+    guard();
     const guestToken = `gp-${Date.now().toString(36)}`;
     const stampGuest = () => {
-      const wc = guestView?.webContents;
+      const wc = currentGuest;
       if (!wc || wc.isDestroyed()) return Promise.resolve();
       return wc
         .executeJavaScript(
@@ -612,6 +675,7 @@ export async function openPreviewWindow(opts = {}) {
         .catch(() => {});
     };
     await stampGuest();
+    guard();
     guestView.webContents.on("dom-ready", () => {
       void stampGuest();
     });
@@ -634,11 +698,13 @@ export async function openPreviewWindow(opts = {}) {
         });
       }
     }
+    guard();
+    if (guestPage) bindGuestWebContents(currentGuest, guestPage);
     const guestWcRef = guestView.webContents;
     // Network/debugger attaches after the native window and guest target exist.
     setImmediate(() => {
       try {
-        if (!isLive() || !guestWcRef || guestWcRef.isDestroyed()) return;
+        if (!isLive() || guestWc() !== guestWcRef || guestWcRef.isDestroyed()) return;
         attachGuestNetwork(guestWcRef, guestPage);
         writeCrashLog("preview", "guest-network-attached");
       } catch (err) {
@@ -678,6 +744,7 @@ export async function openPreviewWindow(opts = {}) {
 }
 
 export function closePreviewWindow() {
+  ownership.release();
   if (!isLive()) return false;
   persistNow();
   previewWin.close();
@@ -707,7 +774,9 @@ export async function navigatePreview(rawUrl) {
   if (!isLive()) {
     throw new Error("Preview is not open");
   }
+  const guard = lifetimeGuard();
   await loadGuest(rawUrl);
+  guard();
   return previewPublicState();
 }
 
@@ -727,11 +796,15 @@ export async function waitForPreviewSettled(timeoutMs = 8000) {
 export async function snapshotPreview() {
   const wc = guestWc();
   if (!wc) throw new Error("Preview is not open");
+  const guard = lifetimeGuard();
   await waitForPreviewSettled();
+  guard();
   await ensureGuestPage(wc);
+  guard();
   if (getGuestPage()) {
     try {
       const raw = await snapshotGuestPage();
+      guard();
       const text = formatPreviewSnapshot({
         url: raw.url || lastUrl,
         title: raw.title || lastTitle,
@@ -752,6 +825,7 @@ export async function snapshotPreview() {
     }
   }
   const raw = await wc.executeJavaScript(PAGE_SNAPSHOT_SCRIPT, true);
+  guard();
   const text = formatPreviewSnapshot(raw || {});
   return {
     text,
@@ -769,10 +843,13 @@ export async function runPreviewAction(action) {
   const wc = guestWc();
   if (!wc) throw new Error("Preview is not open");
   const act = action && typeof action === "object" ? action : {};
+  const guard = lifetimeGuard();
   await ensureGuestPage(wc);
+  guard();
   if (getGuestPage()) {
     try {
-      const result = await runGuestAction(act);
+      const result = await runGuestAction(act, getGuestPage());
+      guard();
       if (result && result.ok === false) {
         const err = new Error(result.error || "Preview action failed");
         err.detail = result;
@@ -783,7 +860,9 @@ export async function runPreviewAction(action) {
       if (getGuestPage()) throw err;
     }
   }
+  guard();
   const result = await wc.executeJavaScript(previewActionScript(act), true);
+  guard();
   if (String(act.action || "") === "press") {
     const key = String(act.key || "Enter");
     const keyCode = key === "Enter" ? "Return" : key;
@@ -815,8 +894,15 @@ export async function sendPreviewCaptureToChat() {
   if (ownerHasProject && !ownerHasProject(owner)) {
     throw new Error("Open a project chat first, then send the screenshot.");
   }
+  const lease = ownership.get();
+  const guard = lifetimeGuard();
+  if (ownerSessionIdForWindow(owner) !== lease?.sessionId) throw new Error("请返回打开此网页的原对话，再发送截图。网页仍为原对话保留。");
   const shot = await screenshotPreview();
+  guard();
+  if (ownerSessionIdForWindow(owner) !== lease.sessionId) throw new Error("对话已切换，截图没有发送。请回到原对话重试。");
   const payload = {
+    sessionId: lease.sessionId,
+    leaseId: lease.leaseId,
     data: shot.data,
     mimeType: shot.mimeType,
     width: shot.width,
@@ -840,7 +926,9 @@ export async function sendPreviewCaptureToChat() {
 export async function screenshotPreview() {
   const wc = guestWc();
   if (!wc) throw new Error("Preview is not open");
+  const guard = lifetimeGuard();
   const image = await wc.capturePage();
+  guard();
   const size = image.getSize();
   const maxW = 1280;
   const resized =
@@ -887,6 +975,7 @@ export function registerPreviewIpc(hooks) {
   if (ipcReady) return;
   ipcReady = true;
   readState = hooks.loadState;
+  ownerSessionIdForWindow = hooks.getOwnerSessionId || (() => null);
   persist = (patch) => hooks.savePatch(patch);
   broadcast = hooks.broadcast;
   ownerHasProject =
@@ -897,21 +986,24 @@ export function registerPreviewIpc(hooks) {
       hooks.getOwner(e) ||
       BrowserWindow.fromWebContents(e.sender) ||
       null;
-    return openPreviewWindow({
-      owner,
-      url: typeof opts?.url === "string" ? opts.url : "",
-    });
+    return requestPreviewOpen(owner, ownerSessionIdForWindow(owner), typeof opts?.url === "string" ? opts.url : "");
   });
 
-  ipcMain.handle("preview:close", async () => closePreviewWindow());
+  const checkSender = e => { const owner = hooks.getOwner(e); return assertPreviewOwner(owner, ownerSessionIdForWindow(owner)); };
+  ipcMain.handle("preview:close", async e => { checkSender(e); return closePreviewWindow(); });
 
-  ipcMain.handle("preview:state", async () => previewPublicState());
+  ipcMain.handle("preview:state", async e => {
+    const state = previewPublicState();
+    try { checkSender(e); return state; }
+    catch { return { open: false, url: "", title: "", viewport: state.viewport, loading: false, ownedElsewhere: state.open }; }
+  });
 
-  ipcMain.handle("preview:navigate", async (_e, url) => navigatePreview(url));
+  ipcMain.handle("preview:navigate", async (e, url) => { checkSender(e); return navigatePreview(url); });
 
-  ipcMain.handle("preview:snapshot", async () => snapshotPreview());
+  ipcMain.handle("preview:snapshot", async e => { checkSender(e); return snapshotPreview(); });
 
-  ipcMain.handle("preview:set-viewport", async (_e, id) => {
+  ipcMain.handle("preview:set-viewport", async (e, id) => {
+    checkSender(e);
     viewportId = VIEWPORTS[id] ? id : "fluid";
     applyViewport();
     persistNow();
