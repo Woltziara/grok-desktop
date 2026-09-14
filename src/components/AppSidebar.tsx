@@ -185,6 +185,7 @@ export const AppSidebar = memo(function AppSidebar({
   onOpenProject,
   openCheckouts = [],
   onOpenSession,
+  onMoveSession,
   onRenameSession,
   onDeleteSession,
   onLogout,
@@ -230,6 +231,7 @@ export const AppSidebar = memo(function AppSidebar({
     sessionId?: string;
     cwd?: string;
   }) => void;
+  onMoveSession?: (opts: {cwd: string; targetCwd: string; sessionId: string}) => void;
   onRenameSession?: (opts: {
     sessionId: string;
     title: string;
@@ -551,6 +553,11 @@ export const AppSidebar = memo(function AppSidebar({
           className={`recent-item session-item ${active ? "active" : ""}`}
           disabled={openingGate}
           title={s.title || "新对话"}
+          draggable={Boolean(onMoveSession && !openingGate && !opts.live)}
+          onDragStart={(e) => {
+            e.dataTransfer.setData("application/x-grok-session", JSON.stringify({cwd: s.cwd || project, sessionId: s.id}));
+            e.dataTransfer.effectAllowed = "move";
+          }}
           onClick={() => {
             if (active) return;
             onOpenSession({
@@ -580,7 +587,7 @@ export const AppSidebar = memo(function AppSidebar({
             {opts.live ? <LiveSpin /> : null}
           </span>
         ) : null}
-        {onRenameSession || onDeleteSession || onTogglePinned || onArchive ? (
+        {onMoveSession || onRenameSession || onDeleteSession || onTogglePinned || onArchive ? (
           <Menu
             trigger={
               <button
@@ -626,6 +633,11 @@ export const AppSidebar = memo(function AppSidebar({
                     归档
                   </MenuItem>
                 )}
+            {onMoveSession ? visibleProjects.filter(folder => !samePathKey(folder.cwd, s.cwd || project)).map(folder => (
+              <MenuItem key={folder.cwd} disabled={opts.live || openingGate} onSelect={() => onMoveSession({cwd: s.cwd || project, sessionId: s.id, targetCwd: folder.cwd})}>
+                移到「{folder.name}」
+              </MenuItem>
+            )) : null}
             {onDeleteSession ? (
               <>
                 <MenuSep />
@@ -807,7 +819,15 @@ export const AppSidebar = memo(function AppSidebar({
                       return (
                         <SortableFolder key={key} id={key}>
                           {({ handleProps }) => (
-                            <div className="project-folder">
+                            <div className="project-folder"
+                              onDragOver={(e) => { if (!openingGate && e.dataTransfer.types.includes("application/x-grok-session")) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } }}
+                              onDrop={(e) => {
+                                const data = e.dataTransfer.getData("application/x-grok-session");
+                                if (!data || openingGate) return;
+                                e.preventDefault(); e.stopPropagation();
+                                try { const row = JSON.parse(data); if (typeof row.cwd === "string" && typeof row.sessionId === "string" && !samePathKey(row.cwd, folder.cwd)) onMoveSession?.({...row, targetCwd: folder.cwd}); } catch { /* Ignore foreign drag data. */ }
+                              }}
+                            >
                               <div className="project-folder-row">
                                 <button
                                   type="button"

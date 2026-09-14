@@ -24,7 +24,8 @@
     "test:acp": "node --test test/acp-rpc.test.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "test:preview": "node scripts/test-preview.mjs"
+    "test:preview": "node scripts/test-preview.mjs",
+    "test:sidebar": "node scripts/test-sidebar.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

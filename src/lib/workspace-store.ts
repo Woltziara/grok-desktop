@@ -1,3 +1,4 @@
+import { migrateSessionFlow } from "../../shared/session-flow-move.mjs";
 /**
  * Local daily-flow state: drafts, pin/archive, reading position, unread,
  * project order. Lives on this machine (the person's home), not the Grok account.
@@ -52,6 +53,7 @@ export type UnreadMark = {
 };
 
 export type FlowState = {
+  sessionLocations?: Record<string, {cwd: string; sequence: number; id: string}>;
   projectOrder: string[];
   pinned: Record<string, number>;
   pinnedProjects: Record<string, number>;
@@ -85,6 +87,7 @@ function parseState(raw: string | null): FlowState {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return { ...EMPTY };
     return {
+      sessionLocations: parsed.sessionLocations || {},
       projectOrder: Array.isArray(parsed.projectOrder) ? parsed.projectOrder : [],
       pinned: parsed.pinned && typeof parsed.pinned === "object" ? parsed.pinned : {},
       pinnedProjects:
@@ -382,3 +385,12 @@ export function popSessionHistory(currentCwd: string, currentId: string) {
 }
 
 export { hasDraftContent, sessionOrgKey };
+
+/** Replay persisted native move receipts after a crash or another window's move. */
+export function applySessionFlowMove(move: {id?: string; cwd: string; targetCwd: string; sessionId: string; phase?: string}) {
+  const storage = storageOrNull();
+  if (!storage) return {ok: false, error: "无法访问草稿存储，原资料未删除。"};
+  const result = migrateSessionFlow(storage, move);
+  state = loadState(); notify();
+  return result;
+}

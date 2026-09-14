@@ -1,6 +1,6 @@
 /**
  * Local session organization: pin, archive, stable project order, drafts.
- * Does not move chats across projects (cwd is bound to CLI storage).
+ * Native conversation relocation is handled by electron/session-move.mjs; these helpers only organize the resulting catalog.
  */
 import { pathFolderKey } from "./sidebar-chats.mjs";
 

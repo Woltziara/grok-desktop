@@ -52,6 +52,7 @@ import {
   timelineHasUserSpeech,
 } from "../shared/workspace-org.mjs";
 import {
+  applySessionFlowMove,
   clearUnread,
   markUnread,
   popSessionHistory,
@@ -129,6 +130,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [catalog, setCatalog] = useState<SessionSummary[]>([]);
+  const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
   const [liveTurnIds, setLiveTurnIds] = useState<string[]>([]);
   /** Live session model from ACP (session/new|load). */
   const [modelId, setModelId] = useState<string | null>(null);
@@ -543,6 +545,39 @@ export default function App() {
       stop = true;
     };
   }, [project, sessionId, sessions, info?.recentProjects]);
+
+  useEffect(() => {
+    const reconcile = async () => {
+      try {
+        for (const move of await window.grokDesktop.listSessionMoves()) {
+          const result = applySessionFlowMove(move);
+          if (!result.ok) setError(result.error || "草稿移动尚未同步");
+        }
+        const list = await window.grokDesktop.listSessionsAll([project, ...(info?.recentProjects || [])].filter((cwd): cwd is string => Boolean(cwd)));
+        setCatalog(list);
+      } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    };
+    void reconcile();
+    return window.grokDesktop.onSessionMoved(() => { void reconcile(); });
+  }, [project, info?.recentProjects]);
+
+  const moveSession = useCallback(async (request: {cwd: string; targetCwd: string; sessionId: string}) => {
+    if (openingRef.current || movingSessionId || !confirmDiscardFiles()) return;
+    setMovingSessionId(request.sessionId);
+    window.dispatchEvent(new Event("grok-flush-draft"));
+    const wasActive = sessionIdRef.current === request.sessionId;
+    try {
+      const result = await window.grokDesktop.moveSession(request);
+      const migrated = applySessionFlowMove(result);
+      if (!migrated.ok) { setError(migrated.error || "草稿迁移尚未完成"); return; }
+      addProjectToOrder(result.targetCwd);
+      setCatalog(await window.grokDesktop.listSessionsAll([request.cwd, result.targetCwd, ...(info?.recentProjects || [])]));
+      if (wasActive && sessionIdRef.current === request.sessionId) {
+        await openSession({mode: "resume", sessionId: request.sessionId, cwd: result.targetCwd});
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setMovingSessionId(null); }
+  }, [openSession, info?.recentProjects, confirmDiscardFiles, movingSessionId]);
 
   const sidebarSessions = useMemo(
     () =>
@@ -1927,6 +1962,7 @@ export default function App() {
               };
               void go();
             }}
+            onMoveSession={(opts) => void moveSession(opts)}
             onRenameSession={(opts) => renameSession(opts)}
             onDeleteSession={(opts) => deleteSession(opts)}
             onLogout={() => void handleLogout()}
@@ -2177,8 +2213,8 @@ export default function App() {
           />
 
           <Composer
-            key={sessionId || "no-session"}
-            conn={conn}
+            key={sessionOrgKey(project, sessionId) || "no-session"}
+            conn={movingSessionId === sessionId ? "connecting" : conn}
             projectOpen={Boolean(project)}
             commands={allCommands}
             promptQueue={promptQueue}

@@ -1,3 +1,4 @@
+import { moveSessionFiles, withSessionMove, movableSessionClients, readSessionMoves, recoverSessionMoves } from "./session-move.mjs";
 import { applyWindowAgentAccess } from "./agent-access.mjs";
 import {
   app,
@@ -1293,6 +1294,32 @@ function registerIpc() {
 
   ipcMain.handle("sessions:live-turns", async () => {
     return listLiveTurnSessionIds();
+  });
+
+  ipcMain.handle("sessions:moves", async () => {
+    recoverSessionMoves();
+    return readSessionMoves().filter(row => row.phase === "committed");
+  });
+  ipcMain.handle("sessions:move", async (e, payload) => {
+    const caller = sessionFromEvent(e);
+    if (!caller || caller.disposed) throw new Error("窗口已关闭");
+    return withSessionMove(payload?.sessionId, async () => {
+      // Existing queued opens finish before inspection; new ones see the lock.
+      await Promise.all([...windowSessions.values()].map(ws => ws.agentChain.catch(() => {})));
+      const clients = movableSessionClients(windowSessions.values(), caller, payload.sessionId);
+      moveSessionFiles(payload, { dryRun: true });
+      for (const {ws,client} of clients) {
+        clearPendingPermissions(ws, payload.sessionId);
+        if (ws.agent === client) { ws.agent = null; ws.stopBackgroundTaskTail?.(); ws.stopBackgroundTaskTail = null; }
+        ws.parkedAgents?.delete(payload.sessionId);
+        await client.dispose();
+      }
+      const result = moveSessionFiles(payload);
+      if (caller.lastSessionId === payload.sessionId) caller.lastCwd = result.targetCwd;
+      rememberProjectSession(result.targetCwd, payload.sessionId);
+      for (const ws of windowSessions.values()) send(ws, "sessions:moved", result);
+      return result;
+    });
   });
 
   ipcMain.handle("sessions:rename", async (e, { cwd, sessionId, title } = {}) => {

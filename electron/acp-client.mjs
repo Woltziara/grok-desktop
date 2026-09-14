@@ -1,3 +1,4 @@
+import { assertSessionNotMoving } from "./session-move.mjs";
 /**
  * Minimal ACP (Agent Client Protocol) client over `grok agent stdio`.
  * Backbone: Grok Build agent runtime via ACP (same path as other embeds).
@@ -657,7 +658,7 @@ export class GrokAcpClient extends EventEmitter {
         sessionId,
         cwd: this.cwd,
         mcpServers: this._previewMcpPayload(),
-        _meta: this._sessionPermissionMeta(),
+        _meta: { ...this._sessionPermissionMeta(), "x.ai/restore_code": false },
       },
       { timeoutMs: LOAD_TIMEOUT_MS },
     );
@@ -1822,6 +1823,7 @@ export class GrokAcpClient extends EventEmitter {
   async prompt(text, { images = [], imageQuality = "compact", origin = "user" } = {}) {
     if (this._needsPromptRestart) await this._resumeAfterCancellation();
     if (!this.sessionId) throw new Error("No ACP session");
+    assertSessionNotMoving(this.sessionId);
     if (this.turnOpen) throw new Error("A turn is already running; use interject or queue");
     const sessionId = this.sessionId;
     const cwd = this.cwd;

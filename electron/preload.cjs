@@ -21,6 +21,13 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   restartAgent: () => ipcRenderer.invoke("agent:restart"),
   listSessions: (cwd) => ipcRenderer.invoke("sessions:list", cwd),
   listSessionsAll: (cwds) => ipcRenderer.invoke("sessions:list-all", cwds || []),
+  moveSession: (opts) => ipcRenderer.invoke("sessions:move", opts),
+  listSessionMoves: () => ipcRenderer.invoke("sessions:moves"),
+  onSessionMoved: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("sessions:moved", listener);
+    return () => ipcRenderer.removeListener("sessions:moved", listener);
+  },
   listLiveTurns: () => ipcRenderer.invoke("sessions:live-turns"),
   renameSession: (opts) => ipcRenderer.invoke("sessions:rename", opts || {}),
   deleteSession: (opts) => ipcRenderer.invoke("sessions:delete", opts || {}),

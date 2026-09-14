@@ -349,8 +349,8 @@ export function useProjectSession(opts: {
   );
 
   const openSession = useCallback(
-    async (sessionOpts: { sessionId?: string; mode?: "new" | "resume" }) => {
-      if (!project) return;
+    async (sessionOpts: { sessionId?: string; mode?: "new" | "resume"; cwd?: string }) => {
+      if (!project && !sessionOpts.cwd) return;
       const status = auth || (await refreshAuth());
       if (!status.authenticated || status.expired) {
         setError("Sign in to Grok first.");
@@ -372,7 +372,7 @@ export function useProjectSession(opts: {
       clearSessionScoped();
       try {
         const res = await window.grokDesktop.openSession({
-          cwd: project,
+          cwd: sessionOpts.cwd || project!,
           sessionId: sessionOpts.sessionId,
           mode: sessionOpts.mode || "resume",
         });

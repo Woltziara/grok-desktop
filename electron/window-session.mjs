@@ -1,3 +1,4 @@
+import { assertSessionNotMoving, resolveMovedSessionCwd } from "./session-move.mjs";
 import { applyAgentAccess } from "./agent-access.mjs";
 /**
  * Per-window agent sessions for File → New Window.
@@ -172,6 +173,7 @@ function takeParkedAgent(ws, sessionId) {
 export function agentForSession(ws, sessionId) {
   if (!ws) return null;
   const sid = String(sessionId || ws.agent?.sessionId || "").trim();
+  assertSessionNotMoving(sid);
   if (ws.agent?.sessionId && String(ws.agent.sessionId) === sid) return ws.agent;
   if (!sid) return ws.agent || null;
   return parkedMap(ws).get(sid) || null;
@@ -537,6 +539,8 @@ export async function disposeOrphanClient(client) {
  */
 export function ensureAgent(ws, cwd, opts = {}) {
   const run = async () => {
+    assertSessionNotMoving(opts.resumeSessionId);
+    if (opts.resumeSessionId) cwd = resolveMovedSessionCwd(cwd, opts.resumeSessionId);
     const gen = ws.generation;
     if (!isSessionLive(ws, gen)) {
       throw new Error("Window closed");
@@ -921,7 +925,7 @@ export function disposeAgentQuick() {
  * }} opts
  */
 export async function openSessionOnWindow(ws, opts) {
-  const cwd = opts.cwd;
+  const cwd = opts.sessionId ? resolveMovedSessionCwd(opts.cwd, opts.sessionId) : opts.cwd;
   const mode = opts.mode || "continue";
   let resumeSessionId = null;
   let forceNew = false;
@@ -942,24 +946,11 @@ export async function openSessionOnWindow(ws, opts) {
   try {
     client = await ensureAgent(ws, cwd, { resumeSessionId, forceNew });
   } catch (err) {
-    if (
-      resumeSessionId &&
-      !forceNew &&
-      isSessionLive(ws, gen) &&
-      !isCancelledRestartError(err)
-    ) {
-      console.warn(
-        "[openSessionOnWindow] resume failed, starting new session:",
-        err?.message || err,
-      );
-      resumeWarning = err?.message || "Could not resume that chat; started a new session.";
-      client = await ensureAgent(ws, cwd, { forceNew: true });
-      forceNew = true;
-      resumeSessionId = null;
-    } else {
-      throw err;
-    }
+    // Opening a remembered conversation must never silently allocate a new id.
+    // The original transcript/draft remains addressable for a later retry.
+    throw err;
   }
+
   if (!isSessionLive(ws, gen)) {
     await disposeOrphanClient(client);
     throw new Error("Window closed");

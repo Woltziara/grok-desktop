@@ -552,6 +552,9 @@ declare global {
       restartAgent: () => Promise<OpenProjectResult>;
       listSessions: (cwd: string) => Promise<SessionSummary[]>;
       listSessionsAll: (cwds: string[]) => Promise<SessionSummary[]>;
+      moveSession: (opts: {cwd: string; targetCwd: string; sessionId: string}) => Promise<{ok: boolean; id?: string; cwd: string; targetCwd: string; sessionId: string; phase?: string; backup?: string}>;
+      listSessionMoves: () => Promise<Array<{id: string; cwd: string; targetCwd: string; sessionId: string; phase: string}>>;
+      onSessionMoved: (callback: (move: {id: string; cwd: string; targetCwd: string; sessionId: string; phase: string}) => void) => () => void;
       listLiveTurns: () => Promise<string[]>;
       renameSession: (opts: {
         cwd: string;
