@@ -26,35 +26,59 @@ jobs:
           import base64, gzip, hashlib, json, pathlib, subprocess
           payload = json.loads(pathlib.Path('.desktop-transfer.json').read_text())
           subprocess.run(['git','merge-base','--is-ancestor',payload['baseCommit'],'HEAD'],check=True)
-          if 'patchText' in payload:
-              patch = payload['patchText'].encode('utf-8')
-              assert payload.get('expectedBlobs'), 'readable patches require resulting blob identities'
+          def allowed(name):
+              p = pathlib.PurePosixPath(name)
+              assert not p.is_absolute() and '..' not in p.parts
+              assert name.startswith(('electron/','shared/','src/','test/','scripts/','docs/')) or name in ('README.md','IMPLEMENTATION-RESULT.md','package.json','package-lock.json','tsconfig.json','vite.config.ts'), name
+          def blob(data):
+              return hashlib.sha1(('blob '+str(len(data))+'\0').encode()+data).hexdigest()
+          count = payload.get('partCount', 0)
+          assert type(count) is int and 0 <= count <= 64
+          parts = [pathlib.Path(f'.desktop-transfer.part-{i:02d}') for i in range(count)]
+          assert all(p.is_file() and not p.is_symlink() and p.stat().st_size <= 250000 for p in parts)
+          if payload.get('format') == 'line-edits-v1':
+              changes = [item for p in parts for item in json.loads(p.read_text())]
+              names = [item['path'] for item in changes]
+              assert len(names) == len(set(names)) and len(names) <= 200
+              prepared = []
+              for item in changes:
+                  name = item['path']; allowed(name); file = pathlib.Path(name)
+                  assert not file.is_symlink()
+                  old = file.read_bytes() if file.exists() else None
+                  assert (blob(old) if old is not None else None) == item['before'], 'base changed: '+name
+                  lines = (old or b'').decode('utf-8').splitlines(keepends=True)
+                  end = 0; result = []
+                  for edit in item['edits']:
+                      start, remove = edit['start'], edit['delete']
+                      assert type(start) is int and type(remove) is int
+                      assert end <= start <= start+remove <= len(lines)
+                      result.extend(lines[end:start]); result.append(edit['text']); end = start+remove
+                  result.extend(lines[end:]); data = ''.join(result).encode('utf-8')
+                  assert blob(data) == item['after'], 'resulting source mismatch: '+name
+                  prepared.append((file,data))
+              for file,data in prepared:
+                  file.parent.mkdir(parents=True,exist_ok=True); file.write_bytes(data)
+              subprocess.run(['git','add','--']+names,check=True)
           else:
-              encoded = payload.get('gzipBase64', '')
-              if 'partCount' in payload:
-                  count = payload['partCount']
-                  assert type(count) is int and 1 <= count <= 64
-                  parts = [pathlib.Path(f'.desktop-transfer.part-{i:02d}') for i in range(count)]
-                  assert all(p.is_file() and not p.is_symlink() and p.stat().st_size <= 16384 for p in parts)
-                  encoded = ''.join(p.read_text().strip() for p in parts)
-              patch = gzip.decompress(base64.b64decode(encoded,validate=True))
-              assert hashlib.sha256(patch).hexdigest() == payload['patchSha256'], 'transport hash mismatch'
-          assert len(patch) <= 8_000_000, 'oversized source patch'
-          target = pathlib.Path('/tmp/desktop-checkpoint.patch'); target.write_bytes(patch)
-          stat = subprocess.check_output(['git','apply','--numstat',str(target)],text=True)
-          paths = []
-          for row in stat.splitlines():
-              path = row.split('\t',2)[2]
-              assert '..' not in pathlib.PurePosixPath(path).parts
-              assert path.startswith(('electron/','shared/','src/','test/','scripts/','docs/')) or path in ('README.md','IMPLEMENTATION-RESULT.md','package.json','package-lock.json','tsconfig.json','vite.config.ts'), path
-              paths.append(path)
-          subprocess.run(['git','apply','--index','--check',str(target)],check=True)
-          subprocess.run(['git','apply','--index',str(target)],check=True)
-          if 'patchText' in payload:
-              assert set(paths) == set(payload['expectedBlobs']), 'incomplete resulting blob manifest'
-              for path, expected in payload['expectedBlobs'].items():
-                  actual = subprocess.check_output(['git','hash-object','--',path],text=True).strip()
-                  assert actual == expected, 'resulting source mismatch: '+path
+              if 'patchText' in payload:
+                  patch = payload['patchText'].encode('utf-8')
+                  assert payload.get('expectedBlobs')
+              else:
+                  encoded = ''.join(p.read_text().strip() for p in parts) if parts else payload['gzipBase64']
+                  patch = gzip.decompress(base64.b64decode(encoded,validate=True))
+                  assert hashlib.sha256(patch).hexdigest() == payload['patchSha256'], 'transport hash mismatch'
+              assert len(patch) <= 8000000
+              target = pathlib.Path('/tmp/desktop-checkpoint.patch'); target.write_bytes(patch)
+              stat = subprocess.check_output(['git','apply','--numstat',str(target)],text=True)
+              names = []
+              for row in stat.splitlines():
+                  name = row.split('\t',2)[2]; allowed(name); names.append(name)
+              subprocess.run(['git','apply','--index','--check',str(target)],check=True)
+              subprocess.run(['git','apply','--index',str(target)],check=True)
+              if 'patchText' in payload:
+                  assert set(names) == set(payload['expectedBlobs'])
+                  for name, expected in payload['expectedBlobs'].items():
+                      assert blob(pathlib.Path(name).read_bytes()) == expected, name
           message = payload['message']
           assert isinstance(message,str) and 1 <= len(message) <= 200
           pathlib.Path('/tmp/desktop-checkpoint-message.txt').write_text(message)
