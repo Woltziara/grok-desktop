@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { sameProjectDirectory, sourceSessionCwd, assertNoAliasCollision } from './session-paths.mjs';
 import { grokHomeDir } from './grok-home.mjs';
 import { encodeSessionCwd, isSafeSessionId } from './sessions.mjs';
 
@@ -40,9 +41,9 @@ export function readSessionMoves(home) {
 export function resolveMovedSessionCwd(cwd, sessionId, home) {
   let current=path.resolve(cwd);
   for (const row of readSessionMoves(home)) {
-    if(row.phase==='committed' && row.sessionId===sessionId && path.resolve(row.cwd)===current) current=row.targetCwd;
+    if(row.phase==='committed' && row.sessionId===sessionId && sameProjectDirectory(row.cwd,current)) current=row.targetCwd;
   }
-  return current;
+  return sourceSessionCwd(homeOf(home),current,sessionId);
 }
 function digest(root) {
   const hash=createHash('sha256');
@@ -93,11 +94,14 @@ export function moveSessionFiles({cwd,targetCwd,sessionId}, {home, afterRename, 
   if(!path.isAbsolute(cwd||'') || !path.isAbsolute(targetCwd||'')) throw new Error('请选择一个完整项目路径');
   recoverSessionMoves(home);
   cwd=resolveMovedSessionCwd(cwd,sessionId,home);
-  targetCwd=fs.realpathSync(targetCwd);
+  // Keep the CLI storage key, summary, journal, IPC result and next ACP cwd identical.
+  targetCwd=path.resolve(targetCwd);
   if(!fs.statSync(targetCwd).isDirectory()) throw new Error('目标不是文件夹');
   if(cwd===targetCwd) return {ok:true,unchanged:true,cwd,targetCwd,sessionId};
   const from=nativePath(home,cwd,sessionId),to=nativePath(home,targetCwd,sessionId);
   if(!exists(from) || !fs.lstatSync(from).isDirectory() || fs.lstatSync(from).isSymbolicLink()) throw new Error('找不到原生对话目录，原草稿未删除。');
+  assertNoAliasCollision(homeOf(home),targetCwd,sessionId,from);
+  if(sameProjectDirectory(cwd,targetCwd)) return {ok:true,unchanged:true,cwd,targetCwd:cwd,sessionId};
   const targetAlias = exists(to) && fs.lstatSync(to).isSymbolicLink() && fs.realpathSync(to)===fs.realpathSync(from) ? fs.readlinkSync(to) : null;
   if(exists(to) && !targetAlias) throw new Error('目标已有同标识对话，未覆盖。');
   const summary=path.join(from,'summary.json');
@@ -111,6 +115,8 @@ export function moveSessionFiles({cwd,targetCwd,sessionId}, {home, afterRename, 
   const row={id,sequence:Math.max(0,...readSessionMoves(home).map(r=>r.sequence))+1,sessionId,cwd,targetCwd,phase:'prepared',backup,targetAlias,sourceHash:before,at:new Date().toISOString()};
   write(path.join(path.dirname(backup),'journal.json'),row);
   fs.mkdirSync(path.dirname(to),{recursive:true});
+  // Recheck after backup: a new target created meanwhile must not be replaced.
+  assertNoAliasCollision(homeOf(home),targetCwd,sessionId,from);
   if(targetAlias) fs.unlinkSync(to);
   fs.renameSync(from,to);
   afterRename?.(); // injectable interruption point used only by tests
