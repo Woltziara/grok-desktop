@@ -180,6 +180,7 @@ export const AppSidebar = memo(function AppSidebar({
   isOpening,
   authBusy,
   onPickProject,
+  onAddProject,
   onNewWorktree,
   onOpenProject,
   openCheckouts = [],
@@ -219,6 +220,8 @@ export const AppSidebar = memo(function AppSidebar({
   isOpening: boolean;
   authBusy: boolean;
   onPickProject: () => void;
+  /** Add a folder to the sidebar without switching the live session. */
+  onAddProject?: () => void;
   onNewWorktree?: () => void;
   onOpenProject: (cwd: string) => void;
   openCheckouts?: OpenCheckoutRow[];
@@ -765,10 +768,10 @@ export const AppSidebar = memo(function AppSidebar({
               <button
                 type="button"
                 className="sidebar-section-plus"
-                title="添加项目"
+                title="把文件夹加到项目列表，不切换当前对话"
                 aria-label="添加项目"
-                onClick={onPickProject}
-                disabled={busyGate}
+                onClick={onAddProject || onPickProject}
+                disabled={onAddProject ? false : busyGate}
               >
                 +
               </button>
@@ -1039,6 +1042,15 @@ export const AppSidebar = memo(function AppSidebar({
                   onClick={() => onOpenSettingsSection("peer")}
                 >
                   把登录送到僚机
+                </button>
+              ) : null}
+              {onOpenSettingsSection ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => onOpenSettingsSection("peer")}
+                >
+                  把软件送到僚机
                 </button>
               ) : null}
               {onOpenSettingsSection ? (

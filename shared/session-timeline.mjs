@@ -19,6 +19,102 @@
  *   session dumps that truly omitted final status stay open until turn_completed.
  */
 
+import {
+  hideWorkingKnowledgeCommit,
+  stripWorkingKnowledgeFromUserText,
+} from "./working-knowledge/envelope.mjs";
+
+export const INTERJECTION_NOTE =
+  "The user sent a message while you were working:";
+export const INTERRUPT_NOTE = "The user interrupted the previous turn:";
+export const UNFINISHED_TASKS_REMINDER =
+  "Make sure to complete any unfinished tasks from previous turns.";
+
+/** @param {any} item */
+export function isInterjectionUser(item) {
+  return item?.kind === "user" && item?.marker === "interjection";
+}
+
+/**
+ * Persisted prompts can contain more than one user_query wrapper. Extract all
+ * human text without ever stringifying image/content objects.
+ * @param {unknown} value
+ * @returns {{ text: string, marker: "interjection" | "interrupt" | null }}
+ */
+export function unwrapUserQueryEnvelope(value) {
+  const raw = typeof value === "string" ? value : extractChunkText(value);
+  if (!raw) return { text: "", marker: null };
+  const parts = [];
+  const re = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/gi;
+  let match;
+  while ((match = re.exec(raw))) {
+    const text = String(match[1] || "").trim();
+    if (text && text !== parts[parts.length - 1]) parts.push(text);
+  }
+  const marker = raw.includes(INTERJECTION_NOTE)
+    ? "interjection"
+    : raw.includes(INTERRUPT_NOTE)
+      ? "interrupt"
+      : null;
+  if (parts.length) return { text: parts.join("\n\n"), marker };
+  let text = raw.trim();
+  if (text.startsWith(INTERJECTION_NOTE)) {
+    text = text.slice(INTERJECTION_NOTE.length).trim();
+  } else if (text.startsWith(INTERRUPT_NOTE)) {
+    text = text.slice(INTERRUPT_NOTE.length).trim();
+  }
+  if (text.endsWith(UNFINISHED_TASKS_REMINDER)) {
+    text = text.slice(0, -UNFINISHED_TASKS_REMINDER.length).trim();
+  }
+  return { text: text || raw, marker };
+}
+
+/** @param {unknown} value */
+export function displayUserMessageText(value) {
+  return unwrapUserQueryEnvelope(value).text;
+}
+
+/**
+ * Append the broadcast echo only when the optimistic originator row is absent.
+ * @param {any[]} items
+ * @param {{ text?: unknown, interjectionId?: unknown }} payload
+ */
+export function applySessionInterjection(items, payload = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const interjectionId = String(payload.interjectionId || "").trim();
+  if (
+    interjectionId &&
+    list.some(
+      (item) =>
+        item?.kind === "user" && item.interjectionId === interjectionId,
+    )
+  ) {
+    return list;
+  }
+  const text = displayUserMessageText(payload.text);
+  if (!text && !interjectionId) return list;
+  return [
+    ...list,
+    {
+      id: interjectionId || uid("user"),
+      kind: "user",
+      text,
+      marker: "interjection",
+      interjectionId: interjectionId || undefined,
+      optimistic: false,
+      at: Date.now(),
+    },
+  ];
+}
+
+/** @param {{ sessionId?: unknown } | null | undefined} payload */
+export function shouldApplySessionInterjection(payload, opts = {}) {
+  if (opts.opening) return false;
+  const incoming = String(payload?.sessionId || "").trim();
+  if (!incoming) return true;
+  return incoming === String(opts.sessionId || "").trim();
+}
+
 let seq = 0;
 
 export function uid(prefix = "id") {
@@ -51,10 +147,11 @@ function lastUserIndexThisTurn(items) {
 }
 
 export function scrubUserText(s) {
-  return String(s || "")
-    .replace(/\[object Object\]/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .trim();
+  return stripWorkingKnowledgeFromUserText(
+    String(s || "")
+      .replace(/\[object Object\]/g, "")
+      .replace(/[ \t]+\n/g, "\n"),
+  );
 }
 
 /**
@@ -91,12 +188,25 @@ export function collapseEchoedUserTurns(items) {
     }
     if (prevUser >= 0) {
       const prev = out[prevUser];
+      const incomingSteer = isInterjectionUser(it);
+      const prevSteer = isInterjectionUser(prev);
+      const sameSteer =
+        (it.interjectionId && prev.interjectionId === it.interjectionId) ||
+        (incomingSteer && prevSteer);
+      // A mid-turn steer must not fold into the prompt that started the turn,
+      // even when the typed text happens to match.
+      if (incomingSteer !== prevSteer && !sameSteer) {
+        out.push(text === it.text ? it : { ...it, text });
+        continue;
+      }
       const pt = scrubUserText(prev.text);
       if (pt === text || (text && pt && (text.startsWith(pt) || pt.startsWith(text)))) {
         out[prevUser] = {
           ...prev,
           text: pt.length >= text.length ? pt : text,
           images: prev.images?.length ? prev.images : it.images,
+          marker: prev.marker || it.marker,
+          interjectionId: prev.interjectionId || it.interjectionId,
         };
         changed = true;
         continue;
@@ -215,7 +325,11 @@ export function appendWorkedIfNeeded(items, at, elapsedMs) {
   let elapsed = Number(elapsedMs);
   if (!Number.isFinite(elapsed) || elapsed <= 0) {
     for (let i = items.length - 1; i >= 0; i -= 1) {
-      if (items[i]?.kind === "user" && typeof items[i].at === "number") {
+      if (
+        items[i]?.kind === "user" &&
+        typeof items[i].at === "number" &&
+        !isInterjectionUser(items[i])
+      ) {
         elapsed = at - items[i].at;
         break;
       }
@@ -244,16 +358,57 @@ export function applySessionUpdate(items, params) {
 
   switch (kind) {
     case "user_message_chunk": {
-      const text = scrubUserText(extractChunkText(update.content));
-      if (!text) return next;
+      const rawText = scrubUserText(extractChunkText(update.content));
+      const parsed = unwrapUserQueryEnvelope(rawText);
+      const text = scrubUserText(parsed.text);
+      const meta = params?._meta && typeof params._meta === "object" ? params._meta : {};
+      const interjectionId = String(
+        meta.interjectionId || meta.interjection_id || "",
+      ).trim();
+      const marker =
+        parsed.marker === "interjection" || meta.interjection
+          ? "interjection"
+          : parsed.marker === "interrupt"
+            ? "interrupt"
+            : null;
+      if (!text && !interjectionId) return next;
+      if (interjectionId) {
+        const existing = next.findIndex(
+          (item) =>
+            item?.kind === "user" && item.interjectionId === interjectionId,
+        );
+        if (existing >= 0) {
+          const last = next[existing];
+          if (last.optimistic || scrubUserText(last.text) === text) return next;
+        }
+      }
       const ui = lastUserIndexThisTurn(next);
       if (ui >= 0) {
         const last = next[ui];
+        const lastSteer = isInterjectionUser(last);
+        const incomingSteer = marker === "interjection";
+        if (incomingSteer && !lastSteer) {
+          next.push({
+            id: interjectionId || uid("user"),
+            kind: "user",
+            text,
+            marker: "interjection",
+            interjectionId: interjectionId || undefined,
+            at,
+          });
+          return next;
+        }
         const prev = scrubUserText(last.text);
         if (last.optimistic) return next;
         if (prev === text || prev.endsWith(text) || text.startsWith(prev)) {
           if (text.length > prev.length) {
-            next[ui] = { ...last, text, at: last.at || at };
+            next[ui] = {
+              ...last,
+              text,
+              at: last.at || at,
+              marker: last.marker || marker || undefined,
+              interjectionId: last.interjectionId || interjectionId || undefined,
+            };
           }
           return next;
         }
@@ -265,9 +420,11 @@ export function applySessionUpdate(items, params) {
         return next;
       }
       next.push({
-        id: uid("user"),
+        id: interjectionId || uid("user"),
         kind: "user",
         text,
+        marker: marker || undefined,
+        interjectionId: interjectionId || undefined,
         at,
       });
       return next;
@@ -282,15 +439,18 @@ export function applySessionUpdate(items, params) {
       if (!text) return next;
       const tip = next[next.length - 1];
       if (tip?.kind === "assistant") {
+        const raw = String(tip.wkRaw || tip.text || "") + text;
         next[next.length - 1] = {
           ...tip,
-          text: (tip.text || "") + text,
+          wkRaw: raw,
+          text: hideWorkingKnowledgeCommit(raw),
         };
       } else {
         next.push({
           id: uid("asst"),
           kind: "assistant",
-          text,
+          wkRaw: text,
+          text: hideWorkingKnowledgeCommit(text),
           at,
         });
       }

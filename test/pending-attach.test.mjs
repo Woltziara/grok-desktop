@@ -17,6 +17,7 @@ test("classifies pdf / word / markdown and rejects unknown binaries", () => {
   assert.equal(classifyAttachKind("clip.mp4"), "other");
   assert.equal(isAllowedAttachKind("other"), false);
   assert.equal(isAllowedAttachKind("pdf"), true);
+  assert.equal(isAllowedAttachKind("folder"), true);
 });
 
 test("duplicate drop uses path, then name+size", () => {
@@ -43,4 +44,12 @@ test("text files inline; pdf keeps a path instruction", () => {
   ]);
   assert.match(merged, /^请看这两份/);
   assert.match(merged, /b\.pdf/);
+});
+
+test("folders keep a path instruction and are not inlined", () => {
+  const prompt = formatAttachedFilesPrompt([
+    { name: "src", kind: "folder", path: "/tmp/project/src" },
+  ]);
+  assert.match(prompt, /整个文件夹「src」/);
+  assert.match(prompt, /@\/tmp\/project\/src/);
 });

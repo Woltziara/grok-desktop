@@ -3,7 +3,7 @@
  * This is what the model should read most of the time (not a screenshot).
  */
 
-export const SNAPSHOT_MAX_CHARS = 8000;
+export const SNAPSHOT_MAX_CHARS = 14000;
 export const SNAPSHOT_MAX_NODES = 220;
 export const SNAPSHOT_MAX_TEXT_CHARS = 2400;
 
@@ -118,11 +118,12 @@ export const PAGE_SNAPSHOT_SCRIPT = `(() => {
 })()`;
 
 /**
- * @param {{ url?: string, title?: string, headings?: string[], alerts?: string[], text?: string, nodes?: Array<Record<string, unknown>>, truncated?: boolean }} raw
+ * @param {{ url?: string, title?: string, yaml?: string, engine?: string, headings?: string[], alerts?: string[], text?: string, nodes?: Array<Record<string, unknown>>, truncated?: boolean }} raw
  */
 export function formatPreviewSnapshot(raw) {
   const url = String(raw?.url || "");
   const title = String(raw?.title || "").trim();
+  const yaml = String(raw?.yaml || "").trim();
   const headings = Array.isArray(raw?.headings) ? raw.headings : [];
   const alerts = Array.isArray(raw?.alerts) ? raw.alerts : [];
   const pageText = String(raw?.text || "").trim();
@@ -131,6 +132,21 @@ export function formatPreviewSnapshot(raw) {
   const lines = [];
   lines.push(`URL: ${url || "(none)"}`);
   lines.push(`Title: ${title || "(untitled)"}`);
+  if (yaml) {
+    lines.push("Snapshot:");
+    lines.push(yaml);
+    lines.push(
+      "Interact: preview_click / preview_fill / preview_fill_form / preview_press / preview_hover.",
+    );
+    lines.push(
+      "Pass ref from [ref=e5] as e5. iframe refs look like f1e12. Coordinates (x,y) only when no ref exists.",
+    );
+    let text = lines.join("\n");
+    if (text.length > SNAPSHOT_MAX_CHARS) {
+      text = `${text.slice(0, SNAPSHOT_MAX_CHARS - 20)}\n…(truncated)`;
+    }
+    return text;
+  }
   if (alerts.length) {
     lines.push("Alerts:");
     for (const a of alerts.slice(0, 12)) lines.push(`  - ${a}`);

@@ -9,6 +9,8 @@ export type DesktopCommandHandlers = {
   toggleAlwaysApprove: () => void | Promise<void>;
   preview?: (args: string) => void | Promise<void>;
   compact?: (hint?: string) => void | Promise<void>;
+  plan?: (args: string) => void | Promise<void>;
+  openKnowledge?: () => void;
 };
 
 /** Resolve next mode when toggling Always-approve. */
@@ -42,6 +44,14 @@ export function runDesktopCommand(
   }
   if (key === "compact") {
     void handlers.compact?.(args);
+    return true;
+  }
+  if (key === "plan") {
+    void handlers.plan?.(args);
+    return true;
+  }
+  if (key === "knowledge") {
+    handlers.openKnowledge?.();
     return true;
   }
   return false;

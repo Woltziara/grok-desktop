@@ -31,6 +31,23 @@ test("PDF is copied into the session folder so the agent can read it", async () 
   }
 });
 
+test("a folder is attached by path and not copied", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-att-dir-"));
+  fs.writeFileSync(path.join(dir, "note.txt"), "hi");
+  try {
+    const row = await importAttachmentFile(dir, {
+      cwd: os.tmpdir(),
+      sessionId: "sess-folder",
+    });
+    assert.equal(row.kind, "folder");
+    assert.equal(row.path, dir);
+    assert.equal(row.staged, undefined);
+    assert.equal(fs.existsSync(path.join(dir, "note.txt")), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("missing files ask the person to pick again", async () => {
   await assert.rejects(
     () => importAttachmentFile("/tmp/does-not-exist-grok-attach.pdf"),

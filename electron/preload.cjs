@@ -1,10 +1,11 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("grokDesktop", {
   /** First React paint — main may now show the shell and drop the native splash. */
   windowReady: () => ipcRenderer.send("window:ready"),
   getInfo: () => ipcRenderer.invoke("app:get-info"),
   pickProject: () => ipcRenderer.invoke("project:pick"),
+  addRecentProject: (cwd) => ipcRenderer.invoke("project:add-recent", cwd),
   openProject: (cwd, opts) => ipcRenderer.invoke("project:open", cwd, opts || {}),
   listOpenCheckouts: () => ipcRenderer.invoke("project:list-open"),
   focusProjectWindow: (windowId) =>
@@ -27,8 +28,16 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   prompt: (text, opts) =>
     ipcRenderer.invoke("agent:prompt", {
       text,
+      origin: opts?.origin === "followup" ? "followup" : "user",
       images: opts?.images || [],
       imageQuality: opts?.imageQuality || "compact",
+    }),
+  interject: (text, opts) =>
+    ipcRenderer.invoke("agent:interject", {
+      text,
+      images: opts?.images || [],
+      imageQuality: opts?.imageQuality || "compact",
+      interjectionId: opts?.interjectionId,
     }),
   cancel: () => ipcRenderer.invoke("agent:cancel"),
   compact: (hint) => ipcRenderer.invoke("agent:compact", hint || ""),
@@ -44,6 +53,11 @@ contextBridge.exposeInMainWorld("grokDesktop", {
     ipcRenderer.invoke("agent:set-allow-writes-session", value),
   listPendingPermissions: () =>
     ipcRenderer.invoke("agent:list-pending-permissions"),
+  listPendingPlanApprovals: () => ipcRenderer.invoke("agent:list-pending-plan-approvals"),
+  listPendingFolderTrust: () => ipcRenderer.invoke("agent:list-pending-folder-trust"),
+  listPendingUserQuestions: () => ipcRenderer.invoke("agent:list-pending-user-questions"),
+  listPendingMcpElicits: () => ipcRenderer.invoke("agent:list-pending-mcp-elicits"),
+  setSessionMode: (modeId) => ipcRenderer.invoke("agent:set-session-mode", modeId),
   respondPlanApproval: (reqId, decision) =>
     ipcRenderer.invoke("agent:plan-approval-respond", { reqId, decision }),
   respondUserQuestion: (reqId, decision) =>
@@ -73,6 +87,18 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   getMemoryStatus: () => ipcRenderer.invoke("memory:status"),
   setMemoryEnabled: (value) => ipcRenderer.invoke("memory:set-enabled", value),
   deleteMemoryEntry: (entryId) => ipcRenderer.invoke("memory:delete", entryId),
+  workingKnowledgeStatus: (opts) =>
+    ipcRenderer.invoke("working-knowledge:status", opts || {}),
+  setWorkingKnowledgeEnabled: (value) =>
+    ipcRenderer.invoke("working-knowledge:set-enabled", value),
+  setWorkingKnowledgeObject: (payload) =>
+    ipcRenderer.invoke("working-knowledge:set-object", payload || {}),
+  correctWorkingKnowledge: (payload) =>
+    ipcRenderer.invoke("working-knowledge:correct", payload || {}),
+  withdrawWorkingKnowledge: (payload) =>
+    ipcRenderer.invoke("working-knowledge:withdraw", payload || {}),
+  armWorkingKnowledgeProbe: () =>
+    ipcRenderer.invoke("working-knowledge:arm-probe"),
   getBilling: () => ipcRenderer.invoke("agent:billing"),
   deleteScheduledTask: (opts) =>
     ipcRenderer.invoke("agent:scheduler-delete", opts || {}),
@@ -84,6 +110,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   activateAccount: (id) => ipcRenderer.invoke("account:activate", id),
   copyAuthToPeer: (direction) =>
     ipcRenderer.invoke("peer:copy-auth", direction || "push"),
+  copyAppToPeer: () => ipcRenderer.invoke("peer:copy-app"),
   setAllowPrerelease: (value) =>
     ipcRenderer.invoke("app:set-allow-prerelease", value),
   setDebugLogging: (value) => ipcRenderer.invoke("app:set-debug-logging", value),
@@ -103,6 +130,15 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
   pickFile: () => ipcRenderer.invoke("fs:pick-file"),
   pickFiles: () => ipcRenderer.invoke("fs:pick-files"),
+  pickFolder: () => ipcRenderer.invoke("fs:pick-folder"),
+  pathForFile: (file) => {
+    try {
+      if (!file || typeof webUtils?.getPathForFile !== "function") return "";
+      return webUtils.getPathForFile(file) || "";
+    } catch {
+      return "";
+    }
+  },
   importAttachment: (path) => ipcRenderer.invoke("attachments:import", path),
   pingAgent: () => ipcRenderer.invoke("agent:ping"),
   artifactPreview: (path) => ipcRenderer.invoke("artifact:preview", path),
@@ -149,6 +185,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
       "agent:session-update",
       "agent:mcp-status",
       "agent:permission-request",
+      "agent:session-interjection",
       "agent:permission-dismiss",
       "agent:plan-approval-request",
       "agent:plan-approval-dismiss",

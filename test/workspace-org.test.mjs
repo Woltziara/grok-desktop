@@ -3,11 +3,13 @@ import { test } from "node:test";
 import {
   archivedChats,
   duplicateProjectNames,
+  ensureLiveSessionInList,
   hasDraftContent,
   mergeDraftSessions,
   organizeFolderChats,
   organizeProjects,
   parentPathSnippet,
+  prependProjectOrder,
   sessionOrgKey,
   shouldAbandonEmptySession,
   stableProjectOrder,
@@ -24,6 +26,17 @@ test("opening another project does not jump it to the top", () => {
     "/tmp/case-a",
     "/tmp/new",
   ]);
+});
+
+test("prependProjectOrder puts a new folder first without dropping others", () => {
+  assert.deepEqual(
+    prependProjectOrder(["/p/alpha", "/p/beta"], "/p/gamma"),
+    ["/p/gamma", "/p/alpha", "/p/beta"],
+  );
+  assert.deepEqual(
+    prependProjectOrder(["/p/alpha", "/p/beta"], "/p/beta"),
+    ["/p/beta", "/p/alpha"],
+  );
 });
 
 test("pinned chats stay above, archived chats hide", () => {
@@ -43,6 +56,11 @@ test("pinned chats stay above, archived chats hide", () => {
     archivedChats(chats, archived).map((c) => c.id),
     ["c"],
   );
+});
+
+test("quotes count as draft content", () => {
+  assert.equal(hasDraftContent({ text: "", quotes: [{ text: "摘" }] }), true);
+  assert.equal(hasDraftContent({ text: "  ", files: [], quotes: [] }), false);
 });
 
 test("empty new chats without a draft are abandoned", () => {
@@ -72,6 +90,17 @@ test("empty new chats without a draft are abandoned", () => {
     timelineHasUserSpeech([{ kind: "user", text: "开始" }]),
     true,
   );
+});
+
+test("the live new chat appears even before disk has a summary", () => {
+  const listed = ensureLiveSessionInList(
+    [{ id: "old", cwd: "/p", title: "旧的" }],
+    { id: "fresh", cwd: "/p" },
+  );
+  assert.equal(listed[0].id, "fresh");
+  assert.equal(listed[0].title, "新对话");
+  const again = ensureLiveSessionInList(listed, { id: "fresh", cwd: "/p" });
+  assert.equal(again.filter((s) => s.id === "fresh").length, 1);
 });
 
 test("draft-only sessions reappear in the catalog", () => {

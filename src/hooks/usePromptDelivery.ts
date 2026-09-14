@@ -8,9 +8,14 @@ import {
   type SetStateAction,
 } from "react";
 import {
+  interjectFollowUp,
+  promptDeliveryAction,
+} from "../../shared/prompt-delivery.mjs";
+import {
   dropQueuedItem,
   editQueuedItem,
   moveQueuedItem,
+  restoreQueuedItem,
 } from "../../shared/queue-order.mjs";
 import type { ComposerSubmit, QueuedPrompt } from "../components/Composer";
 import {
@@ -22,16 +27,30 @@ import { isAuthError, type ConnState } from "../lib/conn";
 import { appendWorkedIfNeeded, finalizeOpenTools, uid } from "../lib/timeline";
 import type { TimelineImage, TimelineItem } from "../vite-env";
 
+type DeliverPayload = {
+  text: string;
+  images: PendingImage[];
+  imageQuality?: "compact" | "high";
+  timelineText?: string;
+  restoreQueueItem?: QueuedPrompt;
+  origin?: "user" | "followup";
+};
+
+function visiblePromptText(payload: Pick<DeliverPayload, "text" | "timelineText">) {
+  return String(payload.timelineText || payload.text || "").trim();
+}
+
 /**
- * Prompt delivery. User sends insert immediately (stop the current turn).
- * Internal follow-ups like Catch up can still be scheduled without cancelling.
+ * Prompt delivery. Mid-turn Enter steers the live turn (Codex-style).
+ * ⌘Enter / Send now still cancels and sends next. Internal follow-ups
+ * like Catch up stay queued without cancelling.
  */
 export function usePromptDelivery(opts: {
   project: string | null;
   conn: ConnState;
   busyRef: MutableRefObject<boolean>;
   openingRef: MutableRefObject<boolean>;
-  pinToBottom: () => void;
+  onPromptSent: () => void;
   setConn: Dispatch<SetStateAction<ConnState>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setItems: Dispatch<SetStateAction<TimelineItem[]>>;
@@ -46,7 +65,7 @@ export function usePromptDelivery(opts: {
     conn,
     busyRef,
     openingRef,
-    pinToBottom,
+    onPromptSent,
     setConn,
     setError,
     setItems,
@@ -62,11 +81,9 @@ export function usePromptDelivery(opts: {
     | ((info: { ok: boolean; cancelled: boolean }) => void | Promise<void>)
     | null
   >(null);
-  const deliverRef = useRef<(payload: {
-    text: string;
-    images: PendingImage[];
-    imageQuality?: "compact" | "high";
-  }) => Promise<void>>(async () => {});
+  const deliverRef = useRef<(payload: DeliverPayload) => Promise<void>>(
+    async () => {},
+  );
 
   useEffect(() => {
     promptQueueRef.current = promptQueue;
@@ -85,12 +102,16 @@ export function usePromptDelivery(opts: {
       text: string,
       images: PendingImage[],
       imageQuality: "compact" | "high" = "compact",
+      timelineText?: string,
+      origin: "user" | "followup" = "user",
     ) => {
       const item: QueuedPrompt = {
         id: uid("q"),
         text,
         images: images.map((img) => ({ ...img })),
         imageQuality,
+        timelineText,
+        origin,
         at: Date.now(),
       };
       setPromptQueue((prev) => {
@@ -129,18 +150,14 @@ export function usePromptDelivery(opts: {
   }, []);
 
   const deliverPrompt = useCallback(
-    async (payload: {
-      text: string;
-      images: PendingImage[];
-      imageQuality?: "compact" | "high";
-    }) => {
+    async (payload: DeliverPayload) => {
       if (!project || busyRef.current || openingRef.current) return;
       const text = payload.text.trim();
       const images = payload.images;
       if (!text && images.length === 0) return;
 
       const gen = deliveryGenRef.current;
-      pinToBottom();
+      onPromptSent();
       busyRef.current = true;
       setConn("busy");
       let ok = false;
@@ -156,7 +173,7 @@ export function usePromptDelivery(opts: {
           id: uid("user"),
           kind: "user",
           text:
-            text ||
+            visiblePromptText(payload) || text ||
             (images.length
               ? `(${images.length} image${images.length > 1 ? "s" : ""})`
               : ""),
@@ -178,6 +195,7 @@ export function usePromptDelivery(opts: {
         await window.grokDesktop.prompt(text, {
           images: images.map(({ data, mimeType }) => ({ data, mimeType })),
           imageQuality: payload.imageQuality || "compact",
+          origin: payload.origin || "user",
         });
         if (stale()) return;
         setItems((prev) =>
@@ -210,7 +228,16 @@ export function usePromptDelivery(opts: {
             },
           ]);
           if (isAuthError(msg)) refreshAuth();
-          onDeliveryFailed?.({ text, images });
+          if (payload.restoreQueueItem) {
+            const item = payload.restoreQueueItem;
+            setPromptQueue((prev) => {
+              const next = restoreQueuedItem(prev, item);
+              promptQueueRef.current = next;
+              return next;
+            });
+          } else {
+            onDeliveryFailed?.({ text, images });
+          }
         }
       } finally {
         if (stale()) {
@@ -228,6 +255,9 @@ export function usePromptDelivery(opts: {
           }
         }
         busyRef.current = false;
+        // Keep a failed FIFO head parked for an explicit retry. Immediately
+        // draining the restored item here would loop and reorder later work.
+        if (payload.restoreQueueItem && !ok && !cancelled) return;
         const nextNow = sendNowRef.current;
         if (nextNow) {
           sendNowRef.current = null;
@@ -240,6 +270,9 @@ export function usePromptDelivery(opts: {
             text: nextNow.text,
             images: nextNow.images,
             imageQuality: nextNow.imageQuality,
+            timelineText: nextNow.timelineText,
+            restoreQueueItem: nextNow,
+            origin: nextNow.origin,
           });
           return;
         }
@@ -254,6 +287,9 @@ export function usePromptDelivery(opts: {
             text: queued.text,
             images: queued.images,
             imageQuality: queued.imageQuality,
+            timelineText: queued.timelineText,
+            restoreQueueItem: queued,
+            origin: queued.origin,
           });
         }
       }
@@ -262,7 +298,7 @@ export function usePromptDelivery(opts: {
       project,
       busyRef,
       openingRef,
-      pinToBottom,
+      onPromptSent,
       setConn,
       setError,
       setItems,
@@ -282,6 +318,8 @@ export function usePromptDelivery(opts: {
       text,
       images,
       imageQuality = "compact",
+      timelineText,
+      origin = "user",
       mode = "auto",
     }: ComposerSubmit): Promise<boolean> => {
       if (!project || openingRef.current || conn === "connecting") {
@@ -289,19 +327,112 @@ export function usePromptDelivery(opts: {
       }
       if (!text && images.length === 0) return false;
 
-      if (busyRef.current) {
-        const item = enqueuePrompt(text, images, imageQuality);
-        if (mode === "now") {
+      const action = promptDeliveryAction(
+        mode,
+        busyRef.current || conn === "busy",
+      );
+      if (action !== "prompt") {
+        if (action === "send-now") {
+          const item = enqueuePrompt(
+            text,
+            images,
+            imageQuality,
+            timelineText,
+            origin,
+          );
           sendNowRef.current = item;
           setItems((prev) => finalizeOpenTools(prev, "cancelled"));
           void window.grokDesktop.cancel();
+          return true;
+        }
+        if (action === "queue") {
+          enqueuePrompt(text, images, imageQuality, timelineText, origin);
+          return true;
+        }
+        const canInterject =
+          typeof window.grokDesktop.interject === "function";
+        if (!canInterject) {
+          enqueuePrompt(text, images, imageQuality, timelineText, origin);
+          return true;
+        }
+        const interjectionId = uid("ij");
+        const timelineImages: TimelineImage[] = images.map((img) => ({
+          mimeType: img.mimeType,
+          previewUrl: img.previewUrl,
+        }));
+        const bubble = {
+          id: interjectionId,
+          kind: "user" as const,
+          text:
+            visiblePromptText({ text, timelineText }) || text ||
+            (images.length
+              ? `(${images.length} image${images.length > 1 ? "s" : ""})`
+              : ""),
+          images: timelineImages.length ? timelineImages : undefined,
+          optimistic: true,
+          marker: "interjection" as const,
+          interjectionId,
+          at: Date.now(),
+        };
+        // Paint first so the broadcast echo can dedupe on interjectionId.
+        onPromptSent();
+        setItems((prev) => [...prev, bubble]);
+        try {
+          const result = await window.grokDesktop.interject(text, {
+            images: images.map(({ data, mimeType }) => ({ data, mimeType })),
+            imageQuality,
+            interjectionId,
+          });
+          const follow = interjectFollowUp(result);
+          if (follow === "ok") return true;
+          setItems((prev) =>
+            prev.filter(
+              (item) =>
+                !(item.kind === "user" && item.interjectionId === interjectionId),
+            ),
+          );
+          if (follow === "queue") {
+            if (!busyRef.current) {
+              void deliverPrompt({
+                text,
+                images,
+                imageQuality,
+                timelineText,
+                origin,
+              });
+            } else {
+              enqueuePrompt(text, images, imageQuality, timelineText, origin);
+            }
+            return true;
+          }
+          const reason =
+            result && typeof result === "object"
+              ? String((result as { error?: unknown; reason?: unknown }).error ||
+                  (result as { reason?: unknown }).reason ||
+                  "没能插进正在做的事")
+              : "没能插进正在做的事";
+          setError(reason);
+          return false;
+        } catch (e: unknown) {
+          setItems((prev) =>
+            prev.filter(
+              (item) =>
+                !(
+                  item.kind === "user" &&
+                  item.interjectionId === interjectionId
+                ),
+            ),
+          );
+          const msg = e instanceof Error ? e.message : String(e);
+          setError(msg || "没能插进正在做的事");
+          return false;
         }
         return true;
       }
 
       // Do not await the full turn — Composer clears the draft on this true.
       // deliverPrompt owns busy/queue drain for the rest of the turn.
-      void deliverPrompt({ text, images, imageQuality });
+      void deliverPrompt({ text, images, imageQuality, timelineText, origin });
       return true;
     },
     [
@@ -311,6 +442,8 @@ export function usePromptDelivery(opts: {
       busyRef,
       enqueuePrompt,
       setItems,
+      setError,
+      onPromptSent,
       deliverPrompt,
     ],
   );
@@ -341,7 +474,13 @@ export function usePromptDelivery(opts: {
 
   /** Next turn after the current one settles, without cancelling it. */
   const queueNextPrompt = useCallback((text: string) => {
-    const item = enqueuePrompt(text, [], "compact");
+    const item = enqueuePrompt(
+      text,
+      [],
+      "compact",
+      undefined,
+      "followup",
+    );
     sendNowRef.current = item;
     return item;
   }, [enqueuePrompt]);
@@ -379,6 +518,9 @@ export function usePromptDelivery(opts: {
           text: item.text,
           images: item.images,
           imageQuality: item.imageQuality,
+          timelineText: item.timelineText,
+          restoreQueueItem: item,
+          origin: item.origin,
         });
       }
     },

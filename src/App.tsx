@@ -12,6 +12,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 
 import { PlanApprovalDialog } from "./components/PlanApprovalDialog";
 import { AskUserDialog } from "./components/AskUserDialog";
+import { WorkingKnowledgeSheet } from "./components/WorkingKnowledgeSheet";
 import { FolderTrustDialog } from "./components/FolderTrustDialog";
 import { McpElicitDialog } from "./components/McpElicitDialog";
 import {
@@ -45,6 +46,7 @@ import { classifyErrorAction } from "../shared/error-actions.mjs";
 import { parkedUpdateNotice } from "../shared/parked-notice.mjs";
 import { folderDisplayName } from "../shared/sidebar-chats.mjs";
 import {
+  ensureLiveSessionInList,
   mergeDraftSessions,
   shouldAbandonEmptySession,
   timelineHasUserSpeech,
@@ -57,6 +59,7 @@ import {
   readDraft,
   readReading,
   rememberProjectOrder,
+  addProjectToOrder,
   saveReading,
   sessionOrgKey,
   setArchived,
@@ -92,11 +95,13 @@ import { redactSensitiveText } from "./lib/privacy";
 import { samePathKey } from "./lib/path-utils";
 import { hideBootSplash } from "./lib/boot-splash";
 import { applyTheme, readStoredTheme, storeTheme } from "./lib/theme";
-import { uid } from "./lib/timeline";
+import { applySessionUpdate, uid } from "./lib/timeline";
+import { planApproveCommentsText } from "../shared/plan-approval.mjs";
 import { useAgentEvents } from "./hooks/useAgentEvents";
 import { useAgentSafety } from "./hooks/useAgentSafety";
 import { useProjectSession } from "./hooks/useProjectSession";
 import { usePromptDelivery } from "./hooks/usePromptDelivery";
+import { useRevealLatestTurn } from "./hooks/useRevealLatestTurn";
 import { useStickToBottom } from "./hooks/useStickToBottom";
 import { useUnsavedGuard } from "./hooks/useUnsavedGuard";
 import type {
@@ -108,6 +113,7 @@ import type {
   OpenCheckoutRow,
   SessionSummary,
   TimelineItem,
+  WorkingKnowledgeSnapshot,
 } from "./vite-env";
 
 export default function App() {
@@ -153,6 +159,12 @@ export default function App() {
   const [gitDetached, setGitDetached] = useState(false);
   const { setFilesDirty, confirmDiscardFiles } = useUnsavedGuard();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [knowledge, setKnowledge] = useState<WorkingKnowledgeSnapshot | null>(
+    null,
+  );
+  const [knowledgeNote, setKnowledgeNote] = useState<string | null>(null);
+  const [knowledgeBusy, setKnowledgeBusy] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
     "mcp" | "plugins" | "skills" | "memory" | "peer" | null
   >(null);
@@ -170,6 +182,20 @@ export default function App() {
   const openingRef = useRef(false);
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const timelineCacheRef = useRef(new Map<string, TimelineItem[]>());
+  const stashLiveTimeline = useCallback(() => {
+    const id = String(sessionIdRef.current || "");
+    if (!id) return;
+    const cur = itemsRef.current;
+    if (cur.length) timelineCacheRef.current.set(id, cur);
+  }, []);
+  const takeCachedTimeline = useCallback((sid?: string | null) => {
+    const id = String(sid || "");
+    if (!id) return undefined;
+    return timelineCacheRef.current.get(id);
+  }, []);
   const modelApplyLock = useRef(false);
   const modelApplyGen = useRef(0);
   const loginGen = useRef(0);
@@ -223,6 +249,8 @@ export default function App() {
     scheduledTasks,
     sessionUsage,
     sessionMode,
+    hydrateSessionMode,
+    syncParkedRequestsFromMain,
     planApproval,
     userQuestion,
     folderTrust,
@@ -250,6 +278,7 @@ export default function App() {
     applyOpenTimeline,
   } = useAgentEvents({
     openingRef,
+    sessionIdRef,
     setConn,
     setError,
     setSessionId,
@@ -315,6 +344,7 @@ export default function App() {
 
   const {
     pinToBottom,
+    revealStart,
     hasNewContent,
     clearNewContent,
     stuckToBottom,
@@ -331,6 +361,13 @@ export default function App() {
       },
     },
   );
+
+  const { markPendingReveal, revealNow } = useRevealLatestTurn({
+    items,
+    scrollerRef: timelineRef,
+    revealStart,
+    resetKey: `${project ?? ""}:${sessionId ?? ""}`,
+  });
 
   const {
     promptQueue,
@@ -350,7 +387,7 @@ export default function App() {
     conn,
     busyRef,
     openingRef,
-    pinToBottom,
+    onPromptSent: markPendingReveal,
     setConn,
     setError,
     setItems,
@@ -398,6 +435,8 @@ export default function App() {
       hydrateBackgroundTasks,
       hydrateScheduledTasks,
       hydrateSessionUsage,
+      hydrateSessionMode,
+      syncParkedRequestsFromMain,
       syncPermissionsFromMain,
       hydrateFromInfo,
       beginOpening,
@@ -405,6 +444,8 @@ export default function App() {
       abortOpening,
       finishOpening,
       applyOpenTimeline,
+      stashLiveTimeline,
+      takeCachedTimeline,
       refreshAuth,
       refreshBackbone,
       setBackbone,
@@ -504,11 +545,14 @@ export default function App() {
 
   const sidebarSessions = useMemo(
     () =>
-      mergeDraftSessions(
-        catalog.length ? catalog : sessions,
-        flow.drafts,
+      ensureLiveSessionInList(
+        mergeDraftSessions(
+          catalog.length ? catalog : sessions,
+          flow.drafts,
+        ),
+        { id: sessionId, cwd: project },
       ) as SessionSummary[],
-    [catalog, sessions, flow.drafts],
+    [catalog, sessions, flow.drafts, sessionId, project],
   );
 
   useEffect(() => {
@@ -677,6 +721,13 @@ export default function App() {
       const sid = String(row.sessionId || "");
       const cwd = String(row.cwd || "");
       if (!sid || !cwd) return;
+      if (row.params) {
+        const prev = timelineCacheRef.current.get(sid) || [];
+        timelineCacheRef.current.set(
+          sid,
+          applySessionUpdate(prev, row.params),
+        );
+      }
       let notice = row.needsYou
         ? { unread: true, failed: false, needsYou: true }
         : parkedUpdateNotice(row.params);
@@ -774,6 +825,22 @@ export default function App() {
     if (!confirmDiscardFiles()) return;
     const cwd = await window.grokDesktop.pickProject();
     if (cwd) await openProject(cwd);
+  };
+
+  /** Catalog only: do not park, cancel, or switch the live agent. */
+  const addProjectToSidebar = async () => {
+    const cwd = await window.grokDesktop.pickProject();
+    if (!cwd) return;
+    try {
+      if (typeof window.grokDesktop.addRecentProject === "function") {
+        await window.grokDesktop.addRecentProject(cwd);
+      }
+      const i = await window.grokDesktop.getInfo();
+      setInfo(i);
+      addProjectToOrder(cwd);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const isOpening = conn === "connecting";
@@ -1224,6 +1291,21 @@ export default function App() {
     });
   }, []);
 
+  const reloadKnowledge = useCallback(async () => {
+    if (typeof window.grokDesktop.workingKnowledgeStatus !== "function") {
+      return;
+    }
+    const snap = await window.grokDesktop.workingKnowledgeStatus({
+      sessionId,
+      cwd: project,
+    });
+    setKnowledge(snap);
+  }, [sessionId, project]);
+
+  useEffect(() => {
+    void reloadKnowledge().catch(() => {});
+  }, [reloadKnowledge, conn, knowledgeOpen]);
+
   const handleLocalCommand = useCallback(
     (name: string, args = "") => {
       runDesktopCommand(
@@ -1234,6 +1316,26 @@ export default function App() {
             applyPermissionMode(nextAlwaysApproveMode(permissionMode)),
           compact: (hint) => {
             void runCompress(hint);
+          },
+          openKnowledge: () => setKnowledgeOpen(true),
+          plan: async (planArgs) => {
+            const text = String(planArgs || "").trim();
+            const sid = sessionIdRef.current;
+            try {
+              if (sessionMode !== "plan") {
+                const result = await window.grokDesktop.setSessionMode("plan");
+                if (!result.agentSynced) throw new Error(result.error || "未能进入计划模式。");
+                if (sid !== sessionIdRef.current || openingRef.current) return;
+                hydrateSessionMode(result.currentModeId);
+              } else if (!text) {
+                appendSystem("已经在计划模式，可以继续补充要求或查看当前计划。");
+              }
+              if (text && sid === sessionIdRef.current && !openingRef.current) {
+                await submitFromComposer({ text, images: [], mode: "auto" });
+              }
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+            }
           },
           preview: async (previewArgs) => {
             const a = String(previewArgs || "").trim();
@@ -1273,6 +1375,9 @@ export default function App() {
       setError,
       runCompress,
       openSideBrowser,
+      sessionMode,
+      hydrateSessionMode,
+      submitFromComposer,
     ],
   );
 
@@ -1755,6 +1860,7 @@ export default function App() {
             collapsed={columns.sidebarCollapsed}
             onToggleCollapsed={columns.toggleSidebar}
             onPickProject={() => void pickProject()}
+            onAddProject={() => void addProjectToSidebar()}
             onNewWorktree={() => {
               if (project) void createWorktreeInNewWindow(project);
             }}
@@ -1772,6 +1878,7 @@ export default function App() {
               ) {
                 return;
               }
+              window.dispatchEvent(new Event("grok-flush-draft"));
               if (project && sessionId) {
                 prevSessionRef.current = {
                   cwd: project,
@@ -1793,13 +1900,17 @@ export default function App() {
                 }
                 const prev = prevSessionRef.current;
                 const nextId = sessionIdRef.current;
+                window.dispatchEvent(new Event("grok-flush-draft"));
+                const hasDraft = Boolean(
+                  prev && readDraft(prev.cwd, prev.sessionId),
+                );
                 if (
                   prev &&
                   shouldAbandonEmptySession({
                     sessionId: prev.sessionId,
                     nextSessionId: nextId || "",
                     hadUserSpeech: prev.hadUserSpeech,
-                    hasDraft: prev.hasDraft,
+                    hasDraft: hasDraft || prev.hasDraft,
                   })
                 ) {
                   try {
@@ -2042,10 +2153,10 @@ export default function App() {
                 className="new-content-banner"
                 onClick={() => {
                   clearNewContent();
-                  pinToBottom();
+                  if (!revealNow()) pinToBottom();
                 }}
               >
-                有新内容，回到底部
+                有新回复
               </button>
             ) : null}
 
@@ -2099,6 +2210,14 @@ export default function App() {
               (/^grok-4/i.test(modelId || "") ? 500_000 : 0)
             }
             onCompress={runMeterCompact}
+            knowledgeLabel={
+              knowledge?.enabled === false
+                ? "认识 · 已关"
+                : knowledge?.activeObjectTitle
+                  ? `认识 · ${knowledge.activeObjectTitle}`
+                  : "工作认识"
+            }
+            onOpenKnowledge={() => setKnowledgeOpen(true)}
           />
         </main>
 
@@ -2181,6 +2300,12 @@ export default function App() {
               title: "设置",
               run: () => onOpenSettings(),
             },
+            {
+              id: "knowledge",
+              title: "工作认识",
+              subtitle: knowledge?.activeObjectTitle || "当前业务对象",
+              run: () => setKnowledgeOpen(true),
+            },
           ]}
           onClose={() => setPaletteOpen(false)}
           onOpenSession={(opts) => {
@@ -2202,11 +2327,137 @@ export default function App() {
 
         <PlanApprovalDialog
           request={planApproval}
-          onRespond={(reqId, decision) => void onPlanApproval(reqId, decision)}
+          onRespond={(reqId, decision) => {
+            const sid = sessionIdRef.current;
+            void (async () => {
+              try {
+                const comments = decision.type === "approved"
+                  ? planApproveCommentsText(decision.feedback)
+                  : "";
+                await onPlanApproval(
+                  reqId,
+                  decision.type === "approved" ? { type: "approved" } : decision,
+                );
+                if (comments && sid === sessionIdRef.current && !openingRef.current) {
+                  await submitFromComposer({ text: comments, images: [], mode: "steer", origin: "followup" });
+                }
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+              }
+            })();
+          }}
         />
         <AskUserDialog
           request={userQuestion}
           onRespond={(reqId, decision) => void onUserQuestion(reqId, decision)}
+        />
+        <WorkingKnowledgeSheet
+          open={knowledgeOpen}
+          snapshot={knowledge}
+          saveNote={knowledgeNote}
+          busy={knowledgeBusy}
+          onClose={() => setKnowledgeOpen(false)}
+          onReload={() => void reloadKnowledge()}
+          onSetEnabled={(next) => {
+            setKnowledgeBusy(true);
+            setKnowledgeNote(null);
+            void window.grokDesktop
+              .setWorkingKnowledgeEnabled(next)
+              .then(async () => {
+                await reloadKnowledge();
+                setKnowledgeNote(next ? "已打开工作认识" : "已关闭工作认识，记录仍保留");
+              })
+              .catch((e: unknown) => {
+                setKnowledgeNote(e instanceof Error ? e.message : String(e));
+              })
+              .finally(() => setKnowledgeBusy(false));
+          }}
+          onSetObject={(objectId) => {
+            setKnowledgeBusy(true);
+            setKnowledgeNote(null);
+            void window.grokDesktop
+              .setWorkingKnowledgeObject({
+                objectId,
+                sessionId,
+                cwd: project,
+              })
+              .then((snap) => {
+                setKnowledge(snap);
+                setKnowledgeNote(
+                  objectId
+                    ? `已切换到 ${snap.activeObjectTitle}，并已保存`
+                    : "已改为未指定。本会话新消息不再写入其他对象的工作认识",
+                );
+              })
+              .catch((e: unknown) => {
+                setKnowledgeNote(e instanceof Error ? e.message : String(e));
+              })
+              .finally(() => setKnowledgeBusy(false));
+          }}
+          onCorrect={(item, text) => {
+            if (!knowledge?.activeObjectId) return;
+            setKnowledgeBusy(true);
+            setKnowledgeNote(null);
+            void window.grokDesktop
+              .correctWorkingKnowledge({
+                objectId: knowledge.activeObjectId,
+                id: item.id,
+                text,
+                sessionId,
+                cwd: project,
+              })
+              .then((res) => {
+                if (res.snapshot) setKnowledge(res.snapshot);
+                else void reloadKnowledge();
+                setKnowledgeNote(
+                  res.ok
+                    ? `已保存纠正 · 版本 ${res.currentVersion ?? knowledge.version}`
+                    : res.error || "纠正没有保存",
+                );
+              })
+              .catch((e: unknown) => {
+                setKnowledgeNote(e instanceof Error ? e.message : String(e));
+              })
+              .finally(() => setKnowledgeBusy(false));
+          }}
+          onWithdraw={(item) => {
+            if (!knowledge?.activeObjectId) return;
+            setKnowledgeBusy(true);
+            setKnowledgeNote(null);
+            void window.grokDesktop
+              .withdrawWorkingKnowledge({
+                objectId: knowledge.activeObjectId,
+                id: item.id,
+                sessionId,
+                cwd: project,
+              })
+              .then((res) => {
+                if (res.snapshot) setKnowledge(res.snapshot);
+                else void reloadKnowledge();
+                setKnowledgeNote(
+                  res.ok
+                    ? `已撤回 · 版本 ${res.currentVersion ?? knowledge.version}`
+                    : res.error || "撤回没有保存",
+                );
+              })
+              .catch((e: unknown) => {
+                setKnowledgeNote(e instanceof Error ? e.message : String(e));
+              })
+              .finally(() => setKnowledgeBusy(false));
+          }}
+          onArmProbe={() => {
+            setKnowledgeBusy(true);
+            void window.grokDesktop
+              .armWorkingKnowledgeProbe()
+              .then((snap) => {
+                setKnowledge(snap);
+                setKnowledgeNote("下一句用户消息会带一次入口探针，不会写入正式工作认识");
+              })
+              .catch((e: unknown) => {
+                setKnowledgeNote(e instanceof Error ? e.message : String(e));
+              })
+              .finally(() => setKnowledgeBusy(false));
+          }}
         />
         <FolderTrustDialog
           request={folderTrust}

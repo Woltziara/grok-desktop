@@ -1,12 +1,40 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   alignmentPreviewText,
+  appBundleFromExecPath,
   parseRsyncDryRun,
   peerHostsForThisMachine,
   rsyncExcludeArgs,
   summarizeFileList,
+  PROJECTS_EXCLUDES,
 } from "../shared/peer-sync.mjs";
+
+test("file alignment cannot restore a retired Grok Desktop source copy", (t) => {
+  if (spawnSync("rsync", ["--version"]).error) {
+    t.skip("rsync is not installed on this host");
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-source-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const target = path.join(root, "target");
+  fs.mkdirSync(path.join(source, "Grok Desktop", "grok-app"), { recursive: true });
+  fs.mkdirSync(path.join(source, "notes", ".dev"), { recursive: true });
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(source, "Grok Desktop", "grok-app", "old.js"), "old version");
+  fs.writeFileSync(path.join(source, "notes", ".dev", "scratch.js"), "scratch");
+  fs.writeFileSync(path.join(source, "notes", "keep.md"), "user material");
+  const result = spawnSync("rsync", ["-a", ...rsyncExcludeArgs(PROJECTS_EXCLUDES), `${source}/`, `${target}/`], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(path.join(target, "Grok Desktop")), false);
+  assert.equal(fs.existsSync(path.join(target, "notes", ".dev")), false);
+  assert.equal(fs.readFileSync(path.join(target, "notes", "keep.md"), "utf8"), "user material");
+});
 
 test("studio sees the laptop hosts", () => {
   const p = peerHostsForThisMachine("Mac-Studio.local");
@@ -55,4 +83,15 @@ test("exclude args pair with rsync", () => {
     "--exclude",
     "dist",
   ]);
+});
+
+test("app bundle path is the .app, not the inner binary", () => {
+  assert.equal(
+    appBundleFromExecPath(
+      "/Applications/Grok Desktop.app/Contents/MacOS/Grok Desktop",
+    ),
+    "/Applications/Grok Desktop.app",
+  );
+  assert.equal(appBundleFromExecPath("/usr/local/bin/electron"), null);
+  assert.equal(appBundleFromExecPath(""), null);
 });

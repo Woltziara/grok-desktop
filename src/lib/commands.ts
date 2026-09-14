@@ -51,13 +51,19 @@ export const DESKTOP_COMMANDS: SlashCommand[] = [
     description: "Enter plan mode (explore + design before coding)",
     source: "desktop",
     inputHint: "description",
-    // Not local: sent to the agent as `/plan …` (same as CLI)
+    local: true,
   },
   {
     name: "compact",
     description: "Summarize older turns to free context (same as topbar Compress)",
     source: "desktop",
     inputHint: "optional note to keep",
+    local: true,
+  },
+  {
+    name: "knowledge",
+    description: "打开工作认识：当前对象、纠正、撤回、切换",
+    source: "desktop",
     local: true,
   },
   {
@@ -87,6 +93,10 @@ export function mergeCommands(parts: {
       if (!key) continue;
       const existing = byName.get(key);
       if (existing) {
+        // Desktop-owned actions must stay in the desktop. In particular /plan
+        // changes session mode before any optional description is prompted;
+        // an agent-advertised command with the same name must not bypass it.
+        if (existing.local) continue;
         // Lower priority number wins; only replace if higher priority
         const existingPri =
           existing.source === "agent" ? 0 : existing.source === "skill" ? 1 : 2;

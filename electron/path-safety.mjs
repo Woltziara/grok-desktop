@@ -137,6 +137,21 @@ function allowedRoots(root, opts = {}) {
       }
     }
   }
+  // macOS exposes the same system directories through /var and /private/var
+  // (likewise /tmp and /etc). Git reports canonical roots; callers may use the
+  // system alias. Admit only verified aliases of an already allowed root.
+  if (process.platform === "darwin") {
+    for (const root of [...roots]) {
+      const match = root.match(/^\/(private\/)?(var|tmp|etc)(?=\/|$)/);
+      if (!match) continue;
+      const alias = match[1] ? root.slice("/private".length) : `/private${root}`;
+      try {
+        if (fs.realpathSync(alias) === fs.realpathSync(root)) roots.push(alias);
+      } catch {
+        // Missing aliases grant nothing; the physical containment check stays.
+      }
+    }
+  }
   // de-dupe
   const seen = new Set();
   /** @type {string[]} */

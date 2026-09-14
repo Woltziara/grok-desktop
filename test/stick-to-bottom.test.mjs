@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   FAR_FROM_BOTTOM_PX,
   NEAR_BOTTOM_PX,
+  TAIL_PX,
   distanceFromBottom,
   isNearBottom,
   shouldHonorScrollPosition,
+  stickAfterScroll,
   wheelWantsEarlierContent,
 } from "../shared/stick-to-bottom.mjs";
 
@@ -34,4 +36,13 @@ test("programmatic stick writes do not unlock while still at the tail", () => {
 test("user leaving the tail is honored even during programmatic ignore", () => {
   assert.equal(shouldHonorScrollPosition(2, FAR_FROM_BOTTOM_PX + 1), true);
   assert.equal(shouldHonorScrollPosition(0, 10), true);
+});
+
+test("unpin stays unpinned in the near-bottom band until the real tail", () => {
+  assert.equal(stickAfterScroll(true, 0), true);
+  assert.equal(stickAfterScroll(true, NEAR_BOTTOM_PX), true);
+  assert.equal(stickAfterScroll(true, NEAR_BOTTOM_PX + 1), false);
+  assert.equal(stickAfterScroll(false, 20), false);
+  assert.equal(stickAfterScroll(false, TAIL_PX), true);
+  assert.equal(stickAfterScroll(false, 0), true);
 });

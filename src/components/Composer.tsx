@@ -12,6 +12,16 @@ import {
 } from "react";
 import { composerEnterAction } from "../../shared/composer-ime.mjs";
 import {
+  collectDroppedPaths,
+  resolveDroppedFilePath,
+} from "../../shared/dropped-paths.mjs";
+import {
+  addComposerQuote,
+  isQuotesOnlySend,
+  normalizeComposerQuotes,
+  serializeQuotesForAgent,
+} from "../../shared/composer-quotes.mjs";
+import {
   attachAcceptAttr,
   mergeComposerTextWithFiles,
 } from "../../shared/pending-attach.mjs";
@@ -65,14 +75,19 @@ export type QueuedPrompt = {
   text: string;
   images: PendingImage[];
   imageQuality?: "compact" | "high";
+  /** Text shown in history when the agent receives a transformed prompt. */
+  timelineText?: string;
+  origin?: "user" | "followup";
   at: number;
 };
 
 export type ComposerSubmit = {
   text: string;
   images: PendingImage[];
-  mode: "auto" | "queue" | "now";
+  mode: "auto" | "steer" | "queue" | "now";
   imageQuality?: "compact" | "high";
+  timelineText?: string;
+  origin?: "user" | "followup";
 };
 
 const COMPOSER_HEIGHT_KEY = "grok-desktop-composer-height";
@@ -148,6 +163,8 @@ export const Composer = memo(function Composer({
   focusNonce = 0,
   onQueueEdit,
   onQueueMove,
+  knowledgeLabel = null,
+  onOpenKnowledge,
 }: {
   conn: ConnState;
   projectOpen: boolean;
@@ -182,10 +199,15 @@ export const Composer = memo(function Composer({
   focusNonce?: number;
   onQueueEdit?: (id: string, text: string) => void;
   onQueueMove?: (id: string, dir: number) => void;
+  knowledgeLabel?: string | null;
+  onOpenKnowledge?: () => void;
 }) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [quotes, setQuotes] = useState<
+    Array<{ id: string; text: string; sourceMessageId?: string }>
+  >([]);
   const [highDetail, setHighDetail] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
@@ -213,6 +235,8 @@ export const Composer = memo(function Composer({
   imagesRef.current = pendingImages;
   const filesRef = useRef(pendingFiles);
   filesRef.current = pendingFiles;
+  const quotesRef = useRef(quotes);
+  quotesRef.current = quotes;
   const highDetailRef = useRef(highDetail);
   highDetailRef.current = highDetail;
   const promptQueueRef = useRef(promptQueue);
@@ -313,8 +337,13 @@ export const Composer = memo(function Composer({
   }, []);
 
   const persistCurrentDraft = useCallback(() => {
-    if (!hydratedRef.current) return;
     if (!sessionCwd || !sessionId) return;
+    const hasLive =
+      Boolean(String(inputRef.current || "").trim()) ||
+      imagesRef.current.length > 0 ||
+      filesRef.current.length > 0 ||
+      Boolean(quotesRef.current?.length);
+    if (!hydratedRef.current && !hasLive) return;
     const files: DraftFile[] = [
       ...imagesRef.current.map((img) => ({
         id: img.id,
@@ -342,6 +371,7 @@ export const Composer = memo(function Composer({
       cursor: textareaRef.current?.selectionStart ?? inputRef.current.length,
       highDetail: highDetailRef.current,
       files,
+      quotes: quotesRef.current,
       savedAt: Date.now(),
       cwd: sessionCwd,
     };
@@ -359,24 +389,32 @@ export const Composer = memo(function Composer({
 
   useEffect(() => {
     const t = window.setTimeout(() => persistCurrentDraft(), 280);
-    return () => window.clearTimeout(t);
-  }, [input, pendingImages, pendingFiles, highDetail, persistCurrentDraft]);
+    return () => {
+      window.clearTimeout(t);
+      persistCurrentDraft();
+    };
+  }, [input, pendingImages, pendingFiles, quotes, highDetail, persistCurrentDraft]);
 
   useEffect(() => {
     return () => persistCurrentDraft();
   }, [persistCurrentDraft]);
 
   useEffect(() => {
+    const onFlush = () => persistCurrentDraft();
+    window.addEventListener("grok-flush-draft", onFlush);
+    return () => window.removeEventListener("grok-flush-draft", onFlush);
+  }, [persistCurrentDraft]);
+
+  useEffect(() => {
     if (!sessionCwd || !sessionId) return;
     let cancelled = false;
     const draft = readDraft(sessionCwd, sessionId);
-    if (!draft) {
-      hydratedRef.current = true;
-      return;
-    }
+    hydratedRef.current = true;
+    if (!draft) return;
+    setInput(draft.text || "");
+    setHighDetail(Boolean(draft.highDetail));
+    setQuotes(normalizeComposerQuotes(draft.quotes));
     void (async () => {
-      setInput(draft.text || "");
-      setHighDetail(Boolean(draft.highDetail));
       const images: PendingImage[] = [];
       const files: PendingFile[] = [];
       let missingImage = false;
@@ -437,7 +475,6 @@ export const Composer = memo(function Composer({
       if (cancelled) return;
       setPendingImages(images);
       setPendingFiles(files);
-      hydratedRef.current = true;
       if (missingImage) {
         onError("有附过的图片找不到完整内容了，需要重新附上。");
       }
@@ -526,6 +563,7 @@ export const Composer = memo(function Composer({
       return [];
     });
     setInput("");
+    setQuotes([]);
     setHighDetail(false);
     if (sessionCwd && sessionId) {
       saveDraft(sessionCwd, sessionId, null);
@@ -645,27 +683,34 @@ export const Composer = memo(function Composer({
         const { files, error } = await filesToPendingFiles([file.source], []);
         if (error) onError(error);
         setPendingFiles((prev) =>
-          prev.map((f) => (f.id === file.id ? files[0] || f : f)),
+          prev.map((f: PendingFile) =>
+            f.id === file.id ? files[0] || f : f,
+          ),
         );
       }
     },
     [importNativePaths, onError],
   );
 
+  const osPathForFile = useCallback((file: File) => {
+    return resolveDroppedFilePath(file, (f: File) => {
+      try {
+        return window.grokDesktop.pathForFile?.(f as File) || "";
+      } catch {
+        return "";
+      }
+    });
+  }, []);
+
   const addDroppedFiles = useCallback(
     async (list: File[]) => {
-      const withPath = list.filter(
-        (f) => typeof (f as File & { path?: string }).path === "string" &&
-          (f as File & { path?: string }).path,
-      );
+      const withPath = list.filter((f) => Boolean(osPathForFile(f)));
       const nativePaths = withPath
-        .map((f) => String((f as File & { path?: string }).path || ""))
+        .map((f) => osPathForFile(f))
         .filter(Boolean);
       if (nativePaths.length) {
         await importNativePaths(nativePaths);
-        const leftover = list.filter((f) => !nativePaths.includes(
-          String((f as File & { path?: string }).path || ""),
-        ));
+        const leftover = list.filter((f) => !nativePaths.includes(osPathForFile(f)));
         if (!leftover.length) return;
         list = leftover;
       }
@@ -685,7 +730,7 @@ export const Composer = memo(function Composer({
       }
       if (error) onError(error);
     },
-    [addImages, importNativePaths, onError],
+    [addImages, importNativePaths, onError, osPathForFile],
   );
 
   useEffect(() => {
@@ -700,6 +745,25 @@ export const Composer = memo(function Composer({
         onImport as EventListener,
       );
   }, [importNativePaths]);
+
+  useEffect(() => {
+    const onQuote = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: string; sourceMessageId?: string }>)
+        .detail;
+      const text = String(detail?.text || "").trim();
+      if (!text) return;
+      setQuotes((prev) =>
+        addComposerQuote(prev, {
+          text,
+          sourceMessageId: detail?.sourceMessageId,
+        }),
+      );
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    window.addEventListener("grok-add-quote", onQuote as EventListener);
+    return () =>
+      window.removeEventListener("grok-add-quote", onQuote as EventListener);
+  }, []);
 
   const removePendingImage = useCallback((id: string) => {
     setPendingImages((prev) => {
@@ -733,6 +797,9 @@ export const Composer = memo(function Composer({
       }
       if (!text) text = mergeComposerTextWithFiles("", draftFiles);
       else text = mergeComposerTextWithFiles(text, draftFiles);
+      const draftQuotes =
+        overrideText !== undefined ? [] : quotesRef.current;
+      text = serializeQuotesForAgent(draftQuotes, text);
       if (!text && draftImages.length === 0) return;
       if (conn === "connecting" || !projectOpen) return;
       submittingRef.current = true;
@@ -794,6 +861,7 @@ export const Composer = memo(function Composer({
           images: images.map((img) => ({ ...img })),
           mode,
           imageQuality,
+          origin: "user",
         });
         if (accepted) clearDraft();
       } finally {
@@ -804,6 +872,7 @@ export const Composer = memo(function Composer({
       input,
       pendingImages,
       pendingFiles,
+      quotes,
       highDetail,
       conn,
       projectOpen,
@@ -884,6 +953,7 @@ export const Composer = memo(function Composer({
         !input.trim() &&
         pendingImages.length === 0 &&
         pendingFiles.length === 0 &&
+        quotes.length === 0 &&
         promptQueueRef.current.length > 0
       ) {
         onSendQueuedNow();
@@ -915,12 +985,46 @@ export const Composer = memo(function Composer({
     await addImages(imageFiles);
   };
 
-  const onDrop = async (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const files = Array.from(e.dataTransfer?.files || []);
-    if (files.length) await addDroppedFiles(files);
-  };
+  const onDrop = useCallback(
+    async (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const paths = collectDroppedPaths(e.dataTransfer, (file) =>
+        osPathForFile(file as File),
+      );
+      if (paths.length) {
+        await importNativePaths(paths);
+        return;
+      }
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) await addDroppedFiles(files);
+      else onError("没能读到这个文件夹的路径，请点「文件夹」按钮再选一次");
+    },
+    [addDroppedFiles, importNativePaths, onError, osPathForFile],
+  );
+
+  useEffect(() => {
+    const hasFiles = (dt: DataTransfer | null) => {
+      if (!dt?.types) return false;
+      return Array.from(dt.types as unknown as string[]).includes("Files");
+    };
+    const onDragOver = (e: globalThis.DragEvent) => {
+      const dataTransfer = e.dataTransfer;
+      if (!hasFiles(dataTransfer) || !dataTransfer) return;
+      e.preventDefault();
+      dataTransfer.dropEffect = "copy";
+    };
+    const onWindowDrop = (e: globalThis.DragEvent) => {
+      if (!hasFiles(e.dataTransfer)) return;
+      void onDrop(e as unknown as DragEvent);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onWindowDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onWindowDrop);
+    };
+  }, [onDrop]);
 
   const tall =
     expanded ||
@@ -983,6 +1087,26 @@ export const Composer = memo(function Composer({
             onSelect={applySlashCommand}
           />
         )}
+        {quotes.length > 0 && (
+          <div className="composer-quotes" aria-label="引用">
+            {quotes.map((q) => (
+              <div key={q.id} className="composer-quote-chip" title={q.text}>
+                <span className="composer-quote-chip__text">{q.text}</span>
+                <button
+                  type="button"
+                  className="composer-quote-chip__x"
+                  title="去掉这段引用"
+                  aria-label="去掉这段引用"
+                  onClick={() =>
+                    setQuotes((prev) => prev.filter((row) => row.id !== q.id))
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {pendingFiles.length > 0 && (
           <div className="composer-files" aria-label="附件">
             {pendingFiles.map((file) => (
@@ -999,7 +1123,9 @@ export const Composer = memo(function Composer({
                     {file.name}
                   </span>
                   <span className="composer-file-kind">
-                    {attachKindLabel(file.kind)} · {formatBytes(file.size)}
+                    {file.kind === "folder"
+                      ? attachKindLabel(file.kind)
+                      : `${attachKindLabel(file.kind)} · ${formatBytes(file.size)}`}
                     {file.status === "ready" ? " · 已准备好" : ""}
                     {file.status === "loading" ? " · 正在读" : ""}
                     {file.status === "error" ? ` · ${file.error || "失败"}` : ""}
@@ -1066,7 +1192,7 @@ export const Composer = memo(function Composer({
             <div className="prompt-queue-head">
               <span>稍后接着做 · {promptQueue.length} 条</span>
               <span className="prompt-queue-hint">
-                回车加入稍后 · ⌘回车现在改方向
+                回车马上插入 · ⌘回车停下再听
               </span>
             </div>
             <ul className="prompt-queue-list">
@@ -1178,6 +1304,16 @@ export const Composer = memo(function Composer({
                 {projectName}
               </span>
             ) : null}
+            {onOpenKnowledge ? (
+              <button
+                type="button"
+                className="btn ghost btn-sm wk-chip"
+                title="查看、纠正或切换当前工作认识"
+                onClick={onOpenKnowledge}
+              >
+                {knowledgeLabel || "工作认识"}
+              </button>
+            ) : null}
             <button
               type="button"
               className="btn ghost btn-sm"
@@ -1194,6 +1330,27 @@ export const Composer = memo(function Composer({
               title="附上图片、PDF、Word 或 Markdown"
             >
               +
+            </button>
+            <button
+              type="button"
+              className="btn ghost btn-sm"
+              disabled={conn === "connecting"}
+              onClick={() => {
+                if (typeof window.grokDesktop.pickFolder !== "function") {
+                  onError("这个版本还不能附上文件夹，请更新后重试");
+                  return;
+                }
+                void window.grokDesktop.pickFolder()
+                  .then((folder) => {
+                    if (folder) void importNativePaths([folder]);
+                  })
+                  .catch((e: unknown) => {
+                    onError(e instanceof Error ? e.message : String(e));
+                  });
+              }}
+              title="附上整个文件夹，发给 Agent 阅读"
+            >
+              文件夹
             </button>
             <button
               type="button"
@@ -1269,13 +1426,45 @@ export const Composer = memo(function Composer({
               onCompress={onCompress}
             />
             {conn === "busy" ? (
-              <button
-                type="button"
-                className="btn danger"
-                onClick={() => onStop?.()}
-              >
-                停下
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn danger"
+                  onClick={() => onStop?.()}
+                >
+                  停下
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  title="等这轮说完再听"
+                  onClick={() => void submit(undefined, "queue")}
+                  disabled={
+                    (!input.trim() &&
+                      pendingImages.length === 0 &&
+                      pendingFiles.length === 0 &&
+                      !isQuotesOnlySend(input, quotes)) ||
+                    !projectOpen
+                  }
+                >
+                  稍后
+                </button>
+                <button
+                  type="button"
+                  className="btn primary"
+                  title="插进正在做的事，不用先停"
+                  onClick={() => void submit(undefined, "auto")}
+                  disabled={
+                    (!input.trim() &&
+                      pendingImages.length === 0 &&
+                      pendingFiles.length === 0 &&
+                      !isQuotesOnlySend(input, quotes)) ||
+                    !projectOpen
+                  }
+                >
+                  插入
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -1284,7 +1473,8 @@ export const Composer = memo(function Composer({
                 disabled={
                   (!input.trim() &&
                     pendingImages.length === 0 &&
-                    pendingFiles.length === 0) ||
+                    pendingFiles.length === 0 &&
+                    !isQuotesOnlySend(input, quotes)) ||
                   conn === "connecting" ||
                   !projectOpen
                 }

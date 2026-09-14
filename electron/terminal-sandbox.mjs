@@ -155,6 +155,77 @@ export function seatbeltLiteral(p) {
   return String(p).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+/** Read only user identity fields; Seatbelt blocks the full home config tree. */
+export function parseGitConfigUser(text) {
+  let inUser = false;
+  let name = "";
+  let email = "";
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const section = line.match(/^\[([^\]]+)\]/);
+    if (section) {
+      inUser = section[1].trim().toLowerCase() === "user";
+      continue;
+    }
+    if (!inUser) continue;
+    const pair = line.match(/^(name|email)\s*=\s*(.*)$/i);
+    if (!pair) continue;
+    let value = pair[2].replace(/\s+#.*$/, "").trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    if (pair[1].toLowerCase() === "name") name = value;
+    else email = value;
+  }
+  return { name, email };
+}
+
+export function readHostGitIdentity(homeDir = os.homedir()) {
+  const candidates = [
+    path.join(homeDir, ".gitconfig"),
+    path.join(process.env.XDG_CONFIG_HOME || path.join(homeDir, ".config"), "git", "config"),
+  ];
+  let name = "";
+  let email = "";
+  for (const file of candidates) {
+    try {
+      const parsed = parseGitConfigUser(fs.readFileSync(file, "utf8"));
+      if (parsed.name) name = parsed.name;
+      if (parsed.email) email = parsed.email;
+    } catch {
+      /* optional config */
+    }
+  }
+  return name || email ? { name, email } : null;
+}
+
+/**
+ * Jailed git otherwise fails on an existing ~/.gitconfig with EPERM. Keep its
+ * global/system config inert while passing only user.name/email when present.
+ */
+export function sandboxedGitEnv(identity = readHostGitIdentity()) {
+  const env = {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const pairs = [];
+  if (identity?.name) pairs.push(["user.name", String(identity.name)]);
+  if (identity?.email) pairs.push(["user.email", String(identity.email)]);
+  pairs.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  });
+  if (pairs.length) env.GIT_CONFIG_COUNT = String(pairs.length);
+  return env;
+}
+
+export function applySandboxedGitEnv(env, identity) {
+  for (const [key, value] of Object.entries(sandboxedGitEnv(identity))) {
+    if (env[key] == null || env[key] === "") env[key] = value;
+  }
+  return env;
+}
+
 /**
  * Windows absolute path → WSL /mnt/<drive>/... form.
  * @param {string} winPath
@@ -1079,6 +1150,10 @@ export function planSandboxedSpawn(opts) {
     fileArgs: opts.fileArgs,
     shell: Boolean(opts.shell),
   });
+
+  if (probe.backend && probe.backend !== "win-host" && probe.backend !== "none") {
+    applySandboxedGitEnv(env);
+  }
 
   // Terminal.app rejects Apple Events from sandbox-exec (“Sandbox”).
   if (

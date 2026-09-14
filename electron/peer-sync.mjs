@@ -13,10 +13,12 @@ import {
 } from "./account-auth.mjs";
 import { publicAccountRow, summarizeAuthRaw } from "../shared/account-auth.mjs";
 import {
+  APPLICATIONS_APP,
   GROK_EXCLUDES,
   GROK_INCLUDE_TOP,
   PROJECTS_EXCLUDES,
   alignmentPreviewText,
+  appBundleFromExecPath,
   parseRsyncDryRun,
   peerHostsForThisMachine,
   rsyncExcludeArgs,
@@ -560,4 +562,98 @@ export async function copyAuthToPeer(userData, direction) {
       /* ignore */
     }
   }
+}
+
+function resolveLocalAppBundle(execPath) {
+  const fromExec = appBundleFromExecPath(execPath);
+  if (fromExec && fs.existsSync(fromExec)) return fromExec;
+  if (fs.existsSync(APPLICATIONS_APP)) return APPLICATIONS_APP;
+  return null;
+}
+
+async function readBundleVersion(appPath) {
+  const info = path.join(appPath, "Contents", "Info");
+  const r = await run("/usr/bin/defaults", ["read", info, "CFBundleShortVersionString"], {
+    timeoutMs: 5000,
+  });
+  return r.code === 0 ? r.stdout.trim() : "";
+}
+
+/**
+ * Replace the other Mac's /Applications/Grok Desktop.app with this Mac's bundle.
+ * Does not touch ~/.grok or ~/Projects.
+ * @param {string} userData
+ * @param {{ execPath?: string }} [opts]
+ */
+export async function copyAppToPeer(userData, opts = {}) {
+  const status = await peerStatus(userData);
+  if (!status.online) {
+    return { ok: false, error: `找不到${status.label}。开着 Tailscale，或用雷雳连上。` };
+  }
+  if (!status.sshReady) {
+    return {
+      ok: false,
+      error: "还没配对。先点「配对僚机」，输入对面的登录密码一次。",
+      needPair: true,
+    };
+  }
+  const src = resolveLocalAppBundle(opts.execPath || process.execPath);
+  if (!src) {
+    return {
+      ok: false,
+      error: "这台没有装好的 Grok Desktop 可以送。请先把现在这套装进「应用程序」。",
+    };
+  }
+  const keys = peerKeyPaths(userData);
+  const host = status.host;
+  const dest = APPLICATIONS_APP;
+  const version = await readBundleVersion(src);
+
+  await run(
+    "ssh",
+    [
+      ...sshBaseArgs(keys.privateKey, host),
+      'osascript -e \'tell application "Grok Desktop" to quit\' >/dev/null 2>&1 || true; sleep 2; killall "Grok Desktop" >/dev/null 2>&1 || true; sleep 1',
+    ],
+    { timeoutMs: 20_000 },
+  );
+
+  const sent = await run(
+    "rsync",
+    [
+      "-a",
+      "--delete",
+      "-s",
+      "-e",
+      rsyncSsh(keys.privateKey),
+      `${src.replace(/\/$/, "")}/`,
+      `${USER}@${host}:${dest.replace(/\/$/, "")}/`,
+    ],
+    { timeoutMs: 30 * 60_000 },
+  );
+  if (sent.code !== 0) {
+    return {
+      ok: false,
+      error: "软件没送过去。对面的「应用程序」可能写不进去。",
+      detail: (sent.stderr || sent.stdout || "").slice(-500),
+    };
+  }
+
+  await run(
+    "ssh",
+    [
+      ...sshBaseArgs(keys.privateKey, host),
+      `xattr -cr ${JSON.stringify(dest)} >/dev/null 2>&1 || true; open -a "Grok Desktop" >/dev/null 2>&1 || true`,
+    ],
+    { timeoutMs: 20_000 },
+  );
+
+  const verBit = version ? `（${version}）` : "";
+  return {
+    ok: true,
+    label: status.label,
+    host,
+    version: version || null,
+    preview: `已经把这边的 Grok Desktop${verBit}装到${status.label}。对话和登录没有跟着走。`,
+  };
 }

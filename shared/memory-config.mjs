@@ -5,11 +5,13 @@
 
 function memorySectionRange(text) {
   const src = String(text || "");
-  const start = src.search(/^\s*\[memory\]\s*$/m);
-  if (start < 0) return null;
-  const after = src.slice(start + 1);
-  const rel = after.search(/^\s*\[[^\]]+\]\s*$/m);
-  const end = rel < 0 ? src.length : start + 1 + rel;
+  const header = /^[\t ]*\[memory\][\t ]*(?:#[^\r\n]*)?\r?$/m.exec(src);
+  if (!header) return null;
+  const start = header.index;
+  const contentStart = start + header[0].length;
+  const after = src.slice(contentStart);
+  const rel = after.search(/^[\t ]*\[[^\]\r\n]+\][\t ]*(?:#[^\r\n]*)?\r?$/m);
+  const end = rel < 0 ? src.length : contentStart + rel;
   return { start, end, body: src.slice(start, end) };
 }
 
@@ -46,9 +48,12 @@ export function setMemoryEnabledInToml(toml, enabled) {
     );
     return src.slice(0, section.start) + nextBody + src.slice(section.end);
   }
-  const header = body.match(/^\s*\[memory\]\s*\n?/);
+  const header = body.match(/^[\t ]*\[memory\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/);
   const insertAt = header ? header[0].length : 0;
+  const eol = src.includes("\r\n") ? "\r\n" : "\n";
+  const prefix = body.slice(0, insertAt);
   const nextBody =
-    body.slice(0, insertAt) + `enabled = ${value}\n` + body.slice(insertAt);
+    prefix + (prefix.endsWith("\n") ? "" : eol) +
+    `enabled = ${value}${eol}` + body.slice(insertAt);
   return src.slice(0, section.start) + nextBody + src.slice(section.end);
 }

@@ -15,16 +15,12 @@ grok agent stdio
 
 This app is a graphical client on that interface. It does not replace or patch the agent monorepo UI.
 
-## Optional: local agent source
+## Agent source is an external reference
 
-Useful if you want to read ACP behaviour or rebuild the CLI yourself:
-
-```bash
-git clone https://github.com/xai-org/grok-build.git
-# place next to this repo, e.g. ../grok-build
-```
-
-You do **not** need a local clone to run Grok Desktop if the official `grok` binary is installed.
+Read ACP implementation details in [xai-org/grok-build](https://github.com/xai-org/grok-build).
+The installed CLI is the runtime dependency; this workspace keeps only the
+desktop product source. Do not recreate sibling agent/Tauri/old-desktop source
+copies as build inputs.
 
 ## Why a separate repo?
 

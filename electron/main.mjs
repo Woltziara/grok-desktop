@@ -1,3 +1,4 @@
+import { applyWindowAgentAccess } from "./agent-access.mjs";
 import {
   app,
   BrowserWindow,
@@ -67,6 +68,7 @@ import {
   ATTACH_DIALOG_FILTERS,
   importAttachmentFile,
 } from "./attachments.mjs";
+import { nextRecentProjects } from "../shared/recent-projects.mjs";
 import {
   listPendingPermissionRequests,
   setOnEnableAlwaysApprove,
@@ -85,12 +87,21 @@ import {
   setMemoryEnabled,
 } from "./memory.mjs";
 import {
+  armWorkingKnowledgeProbe,
+  correctWorkingKnowledge,
+  setWorkingKnowledgeEnabled,
+  setWorkingKnowledgeObject,
+  snapshotWorkingKnowledge,
+  withdrawWorkingKnowledge,
+} from "./working-knowledge.mjs";
+import {
   activateAccount,
   listAccountSnapshots,
   saveCurrentSnapshot,
 } from "./account-auth.mjs";
 import {
   alignPeer,
+  copyAppToPeer,
   copyAuthToPeer,
   pairPeer,
   peerAccountSummary,
@@ -174,6 +185,9 @@ import {
 } from "./preview-window.mjs";
 import { previewApiAddress, startPreviewApi } from "./preview-api.mjs";
 import { installDesktopPreviewSkill } from "./preview-mcp.mjs";
+import { enablePreviewRemoteDebugging } from "./preview-cdp.mjs";
+import { installCrashLogging } from "./crash-log.mjs";
+import { listParked, settleParked } from "./parked-request.mjs";
 import {
   artifactHref,
   ensureArtifactServer,
@@ -186,6 +200,21 @@ import {
   closeSplash,
   createSplashWindow,
 } from "./splash.mjs";
+
+// An explicit profile is a separate instance, including its browser storage and
+// working knowledge. Apply it before stores, logging, or the instance lock.
+const explicitUserData = app.commandLine.getSwitchValue("user-data-dir");
+if (explicitUserData) {
+  if (!path.isAbsolute(explicitUserData)) {
+    throw new Error("--user-data-dir must be an absolute path");
+  }
+  fs.mkdirSync(explicitUserData, { recursive: true });
+  app.setPath("userData", explicitUserData);
+  app.setPath("sessionData", explicitUserData);
+  process.env.GROK_DESKTOP_WK_ROOT ||= path.join(explicitUserData, "working-knowledge");
+}
+installCrashLogging();
+enablePreviewRemoteDebugging();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
@@ -327,14 +356,19 @@ function saveState(state) {
   fs.writeFileSync(storePath, JSON.stringify(state, null, 2));
 }
 
+function rememberRecentProject(cwd) {
+  if (!cwd) return loadState().recentProjects || [];
+  const state = loadState();
+  state.recentProjects = nextRecentProjects(state.recentProjects, cwd);
+  saveState(state);
+  return state.recentProjects;
+}
+
 function rememberProjectSession(cwd, sessionId) {
   if (!cwd || !sessionId) return;
   const state = loadState();
   state.lastProject = cwd;
-  state.recentProjects = [
-    cwd,
-    ...(state.recentProjects || []).filter((p) => p !== cwd),
-  ].slice(0, 12);
+  state.recentProjects = nextRecentProjects(state.recentProjects, cwd);
   state.sessionsByProject = state.sessionsByProject || {};
   state.sessionsByProject[cwd] = sessionId;
   saveState(state);
@@ -821,6 +855,10 @@ function registerIpc() {
     const codingData = ensureCodingDataDefaultOptIn();
     return {
       version: app.getVersion(),
+      pid: process.pid,
+      executable: process.execPath,
+      appPath: app.getAppPath(),
+      sessionData: app.getPath("sessionData"),
       platform: process.platform,
       grokBinary: resolveGrokBinary(),
       grokHome: grokHomeDir(),
@@ -1097,15 +1135,19 @@ function registerIpc() {
       title: "Open project folder",
     });
     if (result.canceled || !result.filePaths[0]) return null;
-    const cwd = result.filePaths[0];
-    const state = loadState();
-    state.lastProject = cwd;
-    state.recentProjects = [
-      cwd,
-      ...(state.recentProjects || []).filter((p) => p !== cwd),
-    ].slice(0, 12);
-    saveState(state);
-    return cwd;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle("project:add-recent", async (_e, cwd) => {
+    const folder = String(cwd || "").trim();
+    if (!folder || !fs.existsSync(folder)) {
+      throw new Error("找不到这个文件夹");
+    }
+    if (!fs.statSync(folder).isDirectory()) {
+      throw new Error("这不是文件夹");
+    }
+    const recentProjects = rememberRecentProject(folder);
+    return { ok: true, cwd: folder, recentProjects };
   });
 
   /**
@@ -1338,18 +1380,55 @@ function registerIpc() {
 
   ipcMain.handle(
     "agent:prompt",
-    async (e, { text, images = [], imageQuality = "compact" }) => {
+    async (e, { text, images = [], imageQuality = "compact", origin = "user" }) => {
       const agent = sessionFromEvent(e)?.agent;
       if (!agent?.ready)
         throw new Error("Agent not connected. Open a project first.");
       try {
-        return await agent.prompt(text, { images, imageQuality });
+        return await agent.prompt(text, {
+          images,
+          imageQuality,
+          origin: origin === "followup" ? "followup" : "user",
+        });
       } catch (err) {
         // IPC clones Error.message only — keep the formatted ACP reason.
         throw new Error(err?.message || String(err));
       }
     },
   );
+
+  ipcMain.handle(
+    "agent:interject",
+    async (
+      e,
+      { text, images = [], imageQuality = "compact", interjectionId } = {},
+    ) => {
+      const agent = sessionFromEvent(e)?.agent;
+      if (!agent?.ready)
+        throw new Error("Agent not connected. Open a project first.");
+      try {
+        return await agent.interject(text, {
+          images,
+          imageQuality,
+          interjectionId,
+        });
+      } catch (err) {
+        throw new Error(err?.message || String(err));
+      }
+    },
+  );
+
+  ipcMain.handle("agent:set-session-mode", async (e, modeId) => {
+    const agent = sessionFromEvent(e)?.agent;
+    if (!agent?.ready || !agent.setSessionMode) {
+      return { agentSynced: false, currentModeId: null, error: "Agent not connected." };
+    }
+    const result = await agent.setSessionMode(modeId);
+    if (sessionFromEvent(e)?.agent !== agent) {
+      return { agentSynced: false, currentModeId: null, error: "Session changed." };
+    }
+    return result;
+  });
 
   ipcMain.handle("agent:fork", async (e, opts = {}) => {
     const agent = sessionFromEvent(e)?.agent;
@@ -1464,16 +1543,29 @@ function registerIpc() {
     );
   });
 
+  for (const [channel, field] of [
+    ["agent:list-pending-plan-approvals", "pendingPlanApprovals"],
+    ["agent:list-pending-folder-trust", "pendingFolderTrust"],
+    ["agent:list-pending-user-questions", "pendingUserQuestions"],
+    ["agent:list-pending-mcp-elicits", "pendingMcpElicits"],
+  ]) {
+    ipcMain.handle(channel, async (e) => {
+      const ws = sessionFromEvent(e);
+      if (!ws) return [];
+      const sid = ws.agent?.sessionId;
+      return listParked(ws[field]).filter(
+        (entry) => !sid || !entry.params?.sessionId || String(entry.params.sessionId) === String(sid),
+      );
+    });
+  }
+
   /**
-   * @param {Map<string, Function> | undefined} map
+   * @param {Map<string, any> | undefined} map
    * @param {string} reqId
    * @param {any} fallback
    */
   const settleParkedIpc = (map, reqId, fallback) => {
-    const settle = map?.get(reqId);
-    if (!settle) return false;
-    settle(fallback);
-    return true;
+    return settleParked(map?.get(reqId), fallback);
   };
 
   ipcMain.handle("agent:plan-approval-respond", async (e, { reqId, decision }) => {
@@ -1589,9 +1681,7 @@ function registerIpc() {
     const state = loadState();
     state.allowOutsideProject = Boolean(value);
     saveState(state);
-    for (const ws of windowSessions.values()) {
-      ws.agent?.setAllowOutsideProject(state.allowOutsideProject);
-    }
+    applyWindowAgentAccess(windowSessions, { allowOutsideProject: state.allowOutsideProject });
     return state.allowOutsideProject;
   });
 
@@ -1600,9 +1690,7 @@ function registerIpc() {
     // Explicit boolean from UI — do not use `!== false` here (undefined would stick ON)
     state.sandboxTerminal = Boolean(value);
     saveState(state);
-    for (const ws of windowSessions.values()) {
-      ws.agent?.setSandboxTerminal(state.sandboxTerminal);
-    }
+    applyWindowAgentAccess(windowSessions, { sandboxTerminal: state.sandboxTerminal });
     // Start Docker image pull/build off the UI thread when sandbox is (re)enabled
     if (state.sandboxTerminal) {
       maybeWarmDockerSandbox();
@@ -1652,6 +1740,52 @@ function registerIpc() {
 
   ipcMain.handle("memory:delete", async (_e, entryId) => {
     return deleteMemoryEntry(String(entryId || ""));
+  });
+
+  ipcMain.handle("working-knowledge:status", async (e, opts = {}) => {
+    const ws = sessionFromEvent(e);
+    return snapshotWorkingKnowledge({
+      sessionId: opts.sessionId || ws?.agent?.sessionId || ws?.lastSessionId || "",
+      cwd: opts.cwd || ws?.agent?.cwd || ws?.lastCwd || "",
+    });
+  });
+
+  ipcMain.handle("working-knowledge:set-enabled", async (_e, value) => {
+    return setWorkingKnowledgeEnabled(Boolean(value));
+  });
+
+  ipcMain.handle("working-knowledge:set-object", async (e, payload = {}) => {
+    const ws = sessionFromEvent(e);
+    return setWorkingKnowledgeObject({
+      objectId: payload.objectId,
+      sessionId:
+        payload.sessionId || ws?.agent?.sessionId || ws?.lastSessionId || "",
+      cwd: payload.cwd || ws?.agent?.cwd || ws?.lastCwd || "",
+    });
+  });
+
+  ipcMain.handle("working-knowledge:correct", async (e, payload = {}) => {
+    const ws = sessionFromEvent(e);
+    return correctWorkingKnowledge({
+      ...payload,
+      sessionId:
+        payload.sessionId || ws?.agent?.sessionId || ws?.lastSessionId || "",
+      cwd: payload.cwd || ws?.agent?.cwd || ws?.lastCwd || "",
+    });
+  });
+
+  ipcMain.handle("working-knowledge:withdraw", async (e, payload = {}) => {
+    const ws = sessionFromEvent(e);
+    return withdrawWorkingKnowledge({
+      ...payload,
+      sessionId:
+        payload.sessionId || ws?.agent?.sessionId || ws?.lastSessionId || "",
+      cwd: payload.cwd || ws?.agent?.cwd || ws?.lastCwd || "",
+    });
+  });
+
+  ipcMain.handle("working-knowledge:arm-probe", async () => {
+    return armWorkingKnowledgeProbe();
   });
 
   ipcMain.handle("peer:status", async () => {
@@ -1712,6 +1846,12 @@ function registerIpc() {
       result.status = broadcastAuthChanged();
     }
     return result;
+  });
+
+  ipcMain.handle("peer:copy-app", async () => {
+    return copyAppToPeer(app.getPath("userData"), {
+      execPath: process.execPath,
+    });
   });
 
   ipcMain.handle("agent:billing", async (e) => {
@@ -1874,6 +2014,21 @@ function registerIpc() {
     });
     if (result.canceled || !result.filePaths?.length) return [];
     return result.filePaths;
+  });
+
+  ipcMain.handle("fs:pick-folder", async (e) => {
+    const ws = sessionFromEvent(e);
+    const parent =
+      ws?.win && !ws.win.isDestroyed()
+        ? ws.win
+        : BrowserWindow.getFocusedWindow() || undefined;
+    const result = await dialog.showOpenDialog(parent, {
+      properties: ["openDirectory"],
+      defaultPath: ws?.agent?.cwd || undefined,
+      title: "附上文件夹",
+    });
+    if (result.canceled || !result.filePaths?.[0]) return null;
+    return result.filePaths[0];
   });
 
   ipcMain.handle("attachments:import", async (e, sourcePath) => {
@@ -2125,6 +2280,10 @@ app.whenReady().then(() => {
   setupAutoUpdater({ disposeAgent: disposeAgentQuick });
 
   void startPreviewApi({
+    windowById: (id) => {
+      const win = BrowserWindow.fromId(Number(id));
+      return win && !win.isDestroyed() ? win : null;
+    },
     getOwner: () => {
       const ws = focusedSession();
       return ws?.win && !ws.win.isDestroyed() ? ws.win : null;

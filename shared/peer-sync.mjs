@@ -4,6 +4,11 @@
  */
 
 export const PROJECTS_EXCLUDES = [
+  // Application source follows its Git history, not bidirectional mtimes.
+  // In particular an older peer must not restore the retired nested clones.
+  "/Grok Desktop/",
+  ".dev",
+  ".grok-desktop",
   "node_modules",
   ".git",
   "dist",
@@ -50,6 +55,22 @@ export const GROK_INCLUDE_TOP = [
   "trusted_folders.toml",
   "slash-mru.json",
 ];
+
+/** Installed desktop shell. Align never copies this; it is sent on its own. */
+export const APPLICATIONS_APP = "/Applications/Grok Desktop.app";
+
+/**
+ * Packaged Electron binary lives at `Something.app/Contents/MacOS/<name>`.
+ * @param {string} execPath
+ * @returns {string | null}
+ */
+export function appBundleFromExecPath(execPath) {
+  const exe = String(execPath || "").replace(/\\/g, "/");
+  const marker = ".app/Contents/MacOS/";
+  const idx = exe.toLowerCase().lastIndexOf(marker.toLowerCase());
+  if (idx === -1) return null;
+  return exe.slice(0, idx + 4);
+}
 
 /**
  * Studio vs 僚机. Tailscale first (works on trips), Thunderbolt when docked.

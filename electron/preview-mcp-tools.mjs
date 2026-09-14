@@ -24,7 +24,7 @@ export const PREVIEW_MCP_TOOLS = [
   {
     name: "preview_snapshot",
     description:
-      "Read the Preview page as compact text (visible copy, alerts, controls with refs). Cheap. Qualified name: desktop-preview__preview_snapshot.",
+      "Read the Preview page as an accessibility tree (YAML with [ref=e5], including iframes as f1e12). Cheap. Qualified name: desktop-preview__preview_snapshot.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -66,16 +66,39 @@ export const PREVIEW_MCP_TOOLS = [
   {
     name: "preview_click",
     description:
-      "Click a control in the Preview window. Prefer ref from the latest snapshot (e.g. e3). Result includes a text snapshot. Qualified name: desktop-preview__preview_click.",
+      "Click a control in the Preview window. Prefer ref from the latest snapshot (e.g. e3 or f1e12). x,y only when no ref exists (canvas / icon). Result includes a text snapshot. Qualified name: desktop-preview__preview_click.",
     inputSchema: {
       type: "object",
       properties: {
-        ref: { type: "string", description: "Snapshot ref such as e3" },
+        ref: { type: "string", description: "Snapshot ref such as e3 or f1e12" },
         selector: { type: "string", description: "CSS selector" },
         name: {
           type: "string",
           description: "Visible label, placeholder, or aria-label",
         },
+        x: {
+          type: "number",
+          description: "Viewport X in CSS pixels. Only when no ref.",
+        },
+        y: {
+          type: "number",
+          description: "Viewport Y in CSS pixels. Only when no ref.",
+        },
+      },
+    },
+  },
+  {
+    name: "preview_hover",
+    description:
+      "Hover a control in the Preview window (menus that open on hover). Prefer snapshot ref. Result includes a text snapshot. Qualified name: desktop-preview__preview_hover.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "Snapshot ref such as e3" },
+        selector: { type: "string" },
+        name: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
       },
     },
   },
@@ -140,11 +163,38 @@ export const PREVIEW_MCP_TOOLS = [
 export const SCREENSHOT_DISABLED_TEXT =
   "preview_screenshot is disabled (viewport JPEGs stay in context). Use preview_snapshot to read the page. The user can already see the Preview window.";
 
+/** MCP header binding a Preview request to the owning chat BrowserWindow. */
+export const PREVIEW_OWNER_HEADER = "X-Grok-Desktop-Window";
+
+export function previewOwnerHeaders(windowId) {
+  const id = Number.parseInt(String(windowId ?? ""), 10);
+  return Number.isInteger(id) && id > 0
+    ? [{ name: PREVIEW_OWNER_HEADER, value: String(id) }]
+    : [];
+}
+
+export function previewOwnerHeaderStamped(headers) {
+  if (!headers || typeof headers !== "object") return false;
+  return Object.keys(headers).some(
+    (key) => key.toLowerCase() === PREVIEW_OWNER_HEADER.toLowerCase(),
+  );
+}
+
+export function previewOwnerIdFromHeaders(headers) {
+  if (!headers || typeof headers !== "object") return null;
+  const entry = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === PREVIEW_OWNER_HEADER.toLowerCase(),
+  );
+  const raw = Array.isArray(entry?.[1]) ? entry[1][0] : entry?.[1];
+  const id = Number.parseInt(String(raw || ""), 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 /**
  * @param {{ url?: string, token?: string }} api
  * @returns {object[]}
  */
-export function previewMcpHttpServers(api) {
+export function previewMcpHttpServers(api, windowId) {
   const url = String(api?.url || "").replace(/\/$/, "");
   const token = String(api?.token || "");
   if (!url || !token) return [];
@@ -153,7 +203,10 @@ export function previewMcpHttpServers(api) {
       type: "http",
       name: "desktop-preview",
       url: `${url}/mcp`,
-      headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+      headers: [
+        { name: "Authorization", value: `Bearer ${token}` },
+        ...previewOwnerHeaders(windowId),
+      ],
     },
   ];
 }
@@ -259,6 +312,14 @@ export async function callPreviewTool(name, args, dispatch) {
       });
       return withPreviewSnapshot(dispatch, `Pressed. ${JSON.stringify(data)}`);
     }
+    case "preview_hover": {
+      const data = await dispatch({
+        method: "POST",
+        path: "/hover",
+        body: args || {},
+      });
+      return withPreviewSnapshot(dispatch, `Hovered. ${JSON.stringify(data)}`);
+    }
     case "preview_interact":
     case "interact": {
       const action = String(args?.action || "click").toLowerCase();
@@ -267,7 +328,9 @@ export async function callPreviewTool(name, args, dispatch) {
           ? "/fill"
           : action === "press" || action === "enter"
             ? "/press"
-            : "/click";
+            : action === "hover"
+              ? "/hover"
+              : "/click";
       const data = await dispatch({
         method: "POST",
         path,

@@ -15,7 +15,7 @@ export type PendingFile = {
   name: string;
   mimeType: string;
   size: number;
-  kind: "image" | "pdf" | "word" | "markdown" | "text" | "other";
+  kind: "image" | "pdf" | "word" | "markdown" | "text" | "folder" | "other";
   status: "ready" | "loading" | "error";
   error?: string;
   path?: string;
@@ -46,10 +46,13 @@ export async function fileToPendingFile(file: File): Promise<PendingFile> {
     source: file,
   };
   if (!isAllowedAttachKind(kind)) {
+    const looksLikeFolder = !file.type && file.size === 0 && !path;
     return {
       ...base,
       status: "error",
-      error: `还不能附上这种文件（${name}）`,
+      error: looksLikeFolder
+        ? `没能读到「${name}」的路径。请点输入框旁的「文件夹」再选一次`
+        : `还不能附上这种文件（${name}）`,
     };
   }
   if (file.size > MAX_ATTACH_BYTES) {

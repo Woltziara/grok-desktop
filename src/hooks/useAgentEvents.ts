@@ -14,7 +14,11 @@ import {
 } from "../lib/background-tasks";
 import { applyScheduledUpdate } from "../../shared/scheduled-tasks.mjs";
 import type { ScheduledLoop } from "../components/ScheduledLoopsBar";
-import { applySessionUpdate } from "../lib/timeline";
+import {
+  applySessionInterjection,
+  applySessionUpdate,
+  shouldApplySessionInterjection,
+} from "../lib/timeline";
 import {
   abortOpen,
   applyBufferedUpdates,
@@ -63,6 +67,7 @@ function toolCallIdFromPermission(p: PermissionRequest | undefined): string | nu
  */
 export function useAgentEvents(opts: {
   openingRef: MutableRefObject<boolean>;
+  sessionIdRef?: MutableRefObject<string | null>;
   setConn: Dispatch<SetStateAction<ConnState>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setSessionId: Dispatch<SetStateAction<string | null>>;
@@ -72,6 +77,7 @@ export function useAgentEvents(opts: {
 }) {
   const {
     openingRef,
+    sessionIdRef,
     setConn,
     setError,
     setSessionId,
@@ -188,9 +194,13 @@ export function useAgentEvents(opts: {
       try {
         const list = await window.grokDesktop.listPendingPermissions();
         if (Array.isArray(list)) {
-          const next = list.filter(
-            (p): p is PermissionRequest => Boolean(p?.reqId),
-          );
+          const liveSid = String(sessionIdRef?.current || "");
+          const next = list.filter((p): p is PermissionRequest => {
+            if (!p?.reqId) return false;
+            const sid = String(p.params?.sessionId || "");
+            if (!sid || !liveSid) return true;
+            return sid === liveSid;
+          });
           // Avoid re-render loops (and scroll side-effects) when nothing changed.
           setPermissions((prev) => {
             if (
@@ -210,13 +220,93 @@ export function useAgentEvents(opts: {
     }
   }, []);
 
+  const syncParkedRequestsFromMain = useCallback(async () => {
+    const api = window.grokDesktop as typeof window.grokDesktop & {
+      listPendingPlanApprovals?: () => Promise<Array<{ reqId: string; params?: Record<string, any> }>>;
+      listPendingFolderTrust?: () => Promise<Array<{ reqId: string; params?: Record<string, any> }>>;
+      listPendingUserQuestions?: () => Promise<Array<{ reqId: string; params?: Record<string, any> }>>;
+      listPendingMcpElicits?: () => Promise<Array<{ reqId: string; params?: Record<string, any> }>>;
+    };
+    const liveSid = String(sessionIdRef?.current || "");
+    const forLiveSession = (rows: Array<{ reqId: string; params?: Record<string, any> }>) =>
+      rows.filter((row) => {
+        const sid = String(row?.params?.sessionId || "");
+        return !sid || (Boolean(liveSid) && sid === liveSid);
+      });
+    const [plans, trusts, questions, elicits] = await Promise.all([
+      api.listPendingPlanApprovals?.().catch(() => []) ?? [],
+      api.listPendingFolderTrust?.().catch(() => []) ?? [],
+      api.listPendingUserQuestions?.().catch(() => []) ?? [],
+      api.listPendingMcpElicits?.().catch(() => []) ?? [],
+    ]);
+    const plan = forLiveSession(plans)[0];
+    setPlanApproval(
+      plan
+        ? {
+            reqId: plan.reqId,
+            planContent: String(plan.params?.planContent || ""),
+            planFilePath:
+              plan.params?.planFilePath == null
+                ? undefined
+                : String(plan.params.planFilePath),
+          }
+        : null,
+    );
+    const trust = forLiveSession(trusts)[0];
+    setFolderTrust(
+      trust
+        ? {
+            reqId: trust.reqId,
+            cwd: trust.params?.cwd == null ? undefined : String(trust.params.cwd),
+            workspace:
+              trust.params?.workspace == null
+                ? undefined
+                : String(trust.params.workspace),
+            configKinds: Array.isArray(trust.params?.configKinds)
+              ? trust.params.configKinds.map(String)
+              : undefined,
+          }
+        : null,
+    );
+    const question = forLiveSession(questions)[0];
+    setUserQuestion(
+      question
+        ? {
+            reqId: question.reqId,
+            questions: Array.isArray(question.params?.questions)
+              ? question.params.questions
+              : [],
+          }
+        : null,
+    );
+    const elicit = forLiveSession(elicits)[0];
+    setMcpElicit(
+      elicit
+        ? {
+            reqId: elicit.reqId,
+            serverName: String(elicit.params?.serverName || "MCP server"),
+            message: String(elicit.params?.message || ""),
+            mode: elicit.params?.mode === "url" ? "url" : "form",
+            url: elicit.params?.url == null ? undefined : String(elicit.params.url),
+            elicitationId:
+              elicit.params?.elicitationId == null
+                ? undefined
+                : String(elicit.params.elicitationId),
+            requestedSchema: elicit.params?.requestedSchema,
+          }
+        : null,
+    );
+  }, [sessionIdRef]);
+
   useEffect(() => {
     void syncPermissionsFromMain();
+    void syncParkedRequestsFromMain();
     // Safety net: if a permission push was dropped (HMR, late subscribe, focus),
     // the agent still waits and the UI stays on "Working…" with no Approvals.
     // Poll while we may be mid-turn or whenever main already holds gates.
     const poll = window.setInterval(() => {
       void syncPermissionsFromMain();
+      void syncParkedRequestsFromMain();
     }, 1500);
     const offs = [
       window.grokDesktop.on("agent:session-update", (params) => {
@@ -278,6 +368,17 @@ export function useAgentEvents(opts: {
           }
           setItems((prev) => applySessionUpdate(prev, params));
         }
+      }),
+      window.grokDesktop.on("agent:session-interjection", (payload) => {
+        if (
+          !shouldApplySessionInterjection(payload, {
+            opening: openingRef.current,
+            sessionId: sessionIdRef?.current || null,
+          })
+        ) {
+          return;
+        }
+        setItems((prev) => applySessionInterjection(prev, payload));
       }),
       window.grokDesktop.on("agent:permission-request", (payload) => {
         const p = payload as PermissionRequest;
@@ -461,6 +562,7 @@ export function useAgentEvents(opts: {
   }, [
     openingRef,
     syncPermissionsFromMain,
+    syncParkedRequestsFromMain,
     setAgentCommands,
     setConn,
     setError,
@@ -500,6 +602,10 @@ export function useAgentEvents(opts: {
     setUserQuestion(null);
     setFolderTrust(null);
     setMcpElicit(null);
+  }, []);
+
+  const hydrateSessionMode = useCallback((mode: string | null) => {
+    setSessionMode(mode ? String(mode) : null);
   }, []);
 
   /** Awaited on successful open so a later grant cannot lose a race with revoke. */
@@ -746,7 +852,10 @@ export function useAgentEvents(opts: {
         | { type: "request_changes"; feedback: string }
         | { type: "abandoned" },
     ) => {
-      await window.grokDesktop.respondPlanApproval(reqId, decision);
+      const ok = await window.grokDesktop.respondPlanApproval(reqId, decision);
+      if (!ok) {
+        throw new Error("The plan approval is no longer open. Nothing was sent.");
+      }
       setPlanApproval(null);
       if (decision.type === "approved" || decision.type === "abandoned") {
         setSessionMode(null);
@@ -806,7 +915,9 @@ export function useAgentEvents(opts: {
     hydrateScheduledTasks,
     dropScheduledTask,
     hydrateSessionUsage,
+    hydrateSessionMode,
     syncPermissionsFromMain,
+    syncParkedRequestsFromMain,
     onPermission,
     onAllowAllPermissions,
     allowWritesThisSession,

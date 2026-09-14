@@ -1,3 +1,4 @@
+import { applyAgentAccess } from "./agent-access.mjs";
 /**
  * Per-window agent sessions for File → New Window.
  *
@@ -27,6 +28,7 @@ import {
   restartTargetFromSources,
   shouldFallbackToNewSession,
 } from "./agent-restart.mjs";
+import { settleParked, wrapParked } from "./parked-request.mjs";
 
 /**
  * Desktop state loader — set once from main at startup.
@@ -74,10 +76,10 @@ function notifyWindowChrome() {
  *   parkedAgents: Map<string, GrokAcpClient>,
  *   agentChain: Promise<unknown>,
  *   stopBackgroundTaskTail: (() => void) | null,
- *   pendingPlanApprovals: Map<string, (decision: any) => void>,
- *   pendingUserQuestions: Map<string, (decision: any) => void>,
- *   pendingFolderTrust: Map<string, (decision: any) => void>,
- *   pendingMcpElicits: Map<string, (decision: any) => void>,
+ *   pendingPlanApprovals: Map<string, { settle: (decision: any) => void, params?: any }>,
+ *   pendingUserQuestions: Map<string, { settle: (decision: any) => void, params?: any }>,
+ *   pendingFolderTrust: Map<string, { settle: (decision: any) => void, params?: any }>,
+ *   pendingMcpElicits: Map<string, { settle: (decision: any) => void, params?: any }>,
  *   disposed: boolean,
  *   generation: number,
  *   lastCwd: string | null,
@@ -385,7 +387,7 @@ export function makeReqId(prefix) {
  *   event: string,
  *   ipcRequest: string,
  *   ipcDismiss: string,
- *   map: Map<string, (decision: any) => void>,
+ *   map: Map<string, { settle: (decision: any) => void, params?: any }>,
  *   prefix: string,
  *   timeoutMs: number,
  *   fallback: any,
@@ -401,39 +403,45 @@ function parkAgentGate(ws, agent, ifCurrent, opts) {
     timeoutMs,
     fallback,
   } = opts;
-  agent.on(
-    event,
-    ifCurrent(({ params, respond }) => {
-      const reqId = makeReqId(prefix);
-      let settled = false;
-      /** @type {ReturnType<typeof setTimeout> | null} */
-      let timer = null;
-      const settle = (decision) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        timer = null;
-        map.delete(reqId);
-        try {
-          respond(decision || fallback);
-        } catch {
-          /* ignore */
-        }
-        if (ws.agent === agent) {
-          send(ws, ipcDismiss, {
-            reqId,
-            timedOut: Boolean(decision?.timedOut),
-          });
-        }
-      };
-      timer = setTimeout(
-        () => settle({ ...fallback, timedOut: true }),
-        timeoutMs,
-      );
-      map.set(reqId, settle);
+  agent.on(event, ({ params, respond }) => {
+    const reqId = makeReqId(prefix);
+    let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null;
+    const settle = (decision) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      map.delete(reqId);
+      try {
+        respond(decision || fallback);
+      } catch {
+        /* ignore */
+      }
+      if (ws.agent === agent) {
+        send(ws, ipcDismiss, {
+          reqId,
+          timedOut: Boolean(decision?.timedOut),
+        });
+      }
+    };
+    timer = setTimeout(
+      () => settle({ ...fallback, timedOut: true }),
+      timeoutMs,
+    );
+    map.set(reqId, wrapParked(settle, params));
+    if (ws.agent === agent) {
       send(ws, ipcRequest, { reqId, params });
-    }),
-  );
+    } else {
+      send(ws, "agent:parked-update", {
+        sessionId: agent.sessionId || null,
+        cwd: agent.cwd || null,
+        needsYou: true,
+        params,
+      });
+    }
+  });
 }
 
 /**
@@ -452,11 +460,11 @@ export function clearPendingPermissions(ws) {
   ];
   for (const { map, fallback } of gates) {
     if (!map) continue;
-    const settlers = [...map.values()];
+    const entries = [...map.values()];
     map.clear();
-    for (const settle of settlers) {
+    for (const entry of entries) {
       try {
-        settle(fallback);
+        settleParked(entry, fallback);
       } catch {
         /* ignore */
       }
@@ -554,6 +562,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
     if (!forceNew && resumeSessionId) {
       const parked = takeParkedAgent(ws, resumeSessionId);
       if (parked?.ready && parked.proc) {
+        applyAgentAccess(parked, loadDesktopState());
         if (agent && agent !== parked) parkLiveAgent(ws);
         ws.agent = parked;
         rememberProjectOnWindow(ws, cwd, parked.sessionId);
@@ -563,6 +572,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
     }
 
     if (agent?.ready && agent.cwd === cwd && agent.proc) {
+      applyAgentAccess(agent, loadDesktopState());
       if (forceNew) {
         parkLiveAgent(ws);
         agent = null;
@@ -606,6 +616,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
     const state = loadDesktopState();
     agent = new GrokAcpClient({
       cwd,
+      windowId: ws.win.id,
       permissionMode: state.permissionMode,
       reasoningEffort: state.reasoningEffort,
       allowOutsideProject: Boolean(state.allowOutsideProject),
@@ -642,7 +653,16 @@ export function ensureAgent(ws, cwd, opts = {}) {
           : { update: params, sessionId: agent.sessionId || null };
       if (ws.agent === agent) {
         if (isDebugLogging()) {
-          debugLog("acp", "session-update", summarizeSessionUpdate(payload));
+          const update = params?.update ?? params ?? {};
+          const kind = update.sessionUpdate || update.session_update || "";
+          if (
+            kind !== "agent_thought_chunk" &&
+            kind !== "agent_message_chunk" &&
+            kind !== "tool_call_delta_chunk" &&
+            kind !== "user_message_chunk"
+          ) {
+            debugLog("acp", "session-update", summarizeSessionUpdate(payload));
+          }
         }
         send(ws, "agent:session-update", payload);
         return;
@@ -651,6 +671,14 @@ export function ensureAgent(ws, cwd, opts = {}) {
         sessionId: agent.sessionId || null,
         cwd: agent.cwd || null,
         params: payload,
+      });
+    });
+
+    agent.on("session-interjection", (payload) => {
+      if (ws.disposed) return;
+      send(ws, "agent:session-interjection", {
+        ...payload,
+        sessionId: payload?.sessionId || agent.sessionId || null,
       });
     });
 
@@ -1058,6 +1086,7 @@ export async function restartAgentOnWindow(ws, opts = {}) {
     resumed,
     modelId: client.currentModelId || null,
     modelName: client.currentModelName || null,
+    sessionMode: client.currentModeId || null,
     history,
     backgroundTasks,
     scheduledTasks,

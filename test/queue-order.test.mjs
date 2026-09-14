@@ -4,6 +4,7 @@ import {
   dropQueuedItem,
   editQueuedItem,
   moveQueuedItem,
+  restoreQueuedItem,
 } from "../shared/queue-order.mjs";
 
 test("queue items can move, edit, and drop", () => {
@@ -21,4 +22,12 @@ test("queue items can move, edit, and drop", () => {
     dropQueuedItem(start, "a").map((r) => r.id),
     ["b", "c"],
   );
+});
+
+test("failed delivery restores the same queue identity at the FIFO head", () => {
+  const failed = { id: "a", text: "first" };
+  const tail = [{ id: "b", text: "second" }];
+  const restored = restoreQueuedItem(tail, failed);
+  assert.deepEqual(restored.map((row) => row.id), ["a", "b"]);
+  assert.equal(restoreQueuedItem(restored, failed), restored);
 });

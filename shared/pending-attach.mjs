@@ -69,7 +69,8 @@ export function isAllowedAttachKind(kind) {
     kind === "pdf" ||
     kind === "word" ||
     kind === "markdown" ||
-    kind === "text"
+    kind === "text" ||
+    kind === "folder"
   );
 }
 
@@ -85,6 +86,8 @@ export function attachKindLabel(kind) {
       return "Markdown";
     case "text":
       return "文本";
+    case "folder":
+      return "文件夹";
     default:
       return "文件";
   }
@@ -133,6 +136,10 @@ export function formatAttachedFilesPrompt(files) {
           ? `${body.slice(0, MAX_INLINE_TEXT_CHARS)}\n…（正文已截断）`
           : body;
       parts.push(`--- 附件 ${name} ---\n${clipped}`);
+      continue;
+    }
+    if (file?.kind === "folder" && path) {
+      parts.push(`请阅读整个文件夹「${name}」。\n@${path}`);
       continue;
     }
     if (path) {

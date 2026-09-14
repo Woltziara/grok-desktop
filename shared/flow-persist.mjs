@@ -50,6 +50,7 @@ export function readDraftRecord(storage, sessionKey) {
   return readJsonItem(storage, draftStorageKey(id));
 }
 
+/** @returns {Record<string, any>} Decoded JSON records, keyed by session. */
 export function readAllDraftRecords(storage) {
   const drafts = {};
   if (!storage || typeof storage.length !== "number") return drafts;

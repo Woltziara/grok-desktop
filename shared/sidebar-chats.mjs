@@ -31,8 +31,9 @@ function sortMs(session) {
 }
 
 /**
+ * @template {{ id: string, cwd?: string, lastMessageAt?: string | null, createdAt?: string | null }} T
  * @param {{
- *   sessions?: Array<{ id: string, cwd?: string, lastMessageAt?: string, createdAt?: string }>,
+ *   sessions?: T[],
  *   projectOrder?: string[],
  *   previewLimit?: number,
  *   recentLimit?: number,
@@ -41,6 +42,7 @@ function sortMs(session) {
 export function groupSidebarChats(opts = {}) {
   const sessions = Array.isArray(opts.sessions) ? opts.sessions : [];
   const order = Array.isArray(opts.projectOrder) ? opts.projectOrder : [];
+  /** @type {Map<string, {cwd: string, chats: T[]}>} */
   const byKey = new Map();
   for (const s of sessions) {
     const cwd = String(s?.cwd || "");
@@ -53,6 +55,7 @@ export function groupSidebarChats(opts = {}) {
     row.chats.sort((a, b) => sortMs(b) - sortMs(a));
   }
   const used = new Set();
+  /** @type {Array<{cwd: string, name: string, chats: T[]}>} */
   const projects = [];
   for (const cwd of order) {
     const k = pathFolderKey(cwd);
@@ -82,6 +85,7 @@ export function groupSidebarChats(opts = {}) {
   };
 }
 
+/** @template T @param {T[]} chats @returns {T[]} */
 export function visibleFolderChats(chats, expanded, previewLimit = SIDEBAR_FOLDER_PREVIEW) {
   const list = Array.isArray(chats) ? chats : [];
   if (expanded || list.length <= previewLimit) return list;

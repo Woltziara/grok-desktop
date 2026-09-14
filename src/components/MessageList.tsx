@@ -1,6 +1,7 @@
 import {
   Fragment,
   memo,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -54,6 +55,8 @@ import { CopyMenu } from "./CopyMenu";
 import { Highlight, highlightChildText } from "./Highlight";
 import { FileResultActions } from "./FileResultActions";
 import { toolFilePath, isFileWriteTool } from "../lib/tool-display";
+import { parseQuotesFromContent } from "../../shared/composer-quotes.mjs";
+import { SelectionQuoteBar } from "./SelectionQuoteBar";
 
 /** Stable empties so default props do not bust React.memo every parent render. */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -495,9 +498,11 @@ const TimelineRow = memo(function TimelineRow({
     ) : null;
 
   if (item.kind === "user") {
-    const text = String(item.text || "")
+    const rawText = String(item.text || "")
       .replace(/\[object Object\]/g, "")
       .trim();
+    const parsedQuotes = parseQuotesFromContent(rawText);
+    const text = parsedQuotes.text.trim() || (parsedQuotes.quotes.length ? "" : rawText);
     const displayText = redact(text);
     const inv = parseSlashInvocation(text);
     const isCmd = Boolean(inv);
@@ -521,6 +526,13 @@ const TimelineRow = memo(function TimelineRow({
           data-msg-id={item.id}
           className={`msg user-prose${isCmd ? " user-command" : ""}${isEditing ? " is-editing" : ""}`}
         >
+          {!isEditing && parsedQuotes.quotes.length > 0
+            ? parsedQuotes.quotes.map((q) => (
+                <div key={q.id} className="user-quote-card">
+                  {redact(q.text)}
+                </div>
+              ))
+            : null}
           {item.images && item.images.length > 0 && !isEditing && (
             <div className="msg-images">
               {item.images.map((img, j) => (
@@ -545,6 +557,9 @@ const TimelineRow = memo(function TimelineRow({
             />
           ) : displayText ? (
             <div className="user-bubble">
+              {item.marker === "interjection" ? (
+                <div className="user-steer-tag">边想边改</div>
+              ) : null}
               {inv ? (
                 <div className="body body-command">
                   <div
@@ -1014,6 +1029,114 @@ export const MessageList = memo(function MessageList({
     };
   }, []);
 
+  const [quoteBar, setQuoteBar] = useState<{
+    x: number;
+    y: number;
+    text: string;
+    sourceMessageId?: string;
+  } | null>(null);
+
+  const closeQuoteBar = useCallback(() => setQuoteBar(null), []);
+
+  const readReplySelection = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return null;
+    const text = sel.toString().replace(/\u00a0/g, " ").trim();
+    if (!text) return null;
+    const anchor = sel.anchorNode;
+    const el =
+      anchor instanceof Element
+        ? anchor
+        : anchor?.parentElement || null;
+    const msg = el?.closest?.(
+      ".msg.grok-prose, .msg.user-prose, .msg.plan",
+    );
+    if (!msg) return null;
+    let sourceMessageId: string | undefined;
+    const id = msg.getAttribute("data-msg-id");
+    if (id) sourceMessageId = id;
+    let rect: DOMRect | null = null;
+    if (sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0).getBoundingClientRect();
+      if (r.width || r.height) rect = r;
+    }
+    return { text, sourceMessageId, rect };
+  }, []);
+
+  useEffect(() => {
+    const showBar = (
+      next: NonNullable<ReturnType<typeof readReplySelection>>,
+      fallback?: { x: number; y: number },
+    ) => {
+      setQuoteBar({
+        x: next.rect
+          ? next.rect.left + next.rect.width / 2 - 100
+          : fallback?.x ?? 24,
+        y: next.rect ? next.rect.bottom + 8 : fallback?.y ?? 24,
+        text: next.text,
+        sourceMessageId: next.sourceMessageId,
+      });
+    };
+    const onUp = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      window.setTimeout(() => {
+        const next = readReplySelection();
+        if (next) showBar(next, { x: e.clientX, y: e.clientY + 8 });
+      }, 0);
+    };
+    const onSel = () => {
+      const next = readReplySelection();
+      if (next) showBar(next);
+    };
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest(".sel-quote-bar")) return;
+      if (t?.closest(".msg.grok-prose, .msg.user-prose, .msg.plan")) return;
+      setQuoteBar(null);
+    };
+    const onContext = (e: MouseEvent) => {
+      const next = readReplySelection();
+      if (!next) return;
+      e.preventDefault();
+      showBar(next, { x: e.clientX, y: e.clientY + 8 });
+    };
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("selectionchange", onSel);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("contextmenu", onContext);
+    return () => {
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("selectionchange", onSel);
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("contextmenu", onContext);
+    };
+  }, [readReplySelection]);
+
+  const quoteBarNode = quoteBar ? (
+    <SelectionQuoteBar
+      x={quoteBar.x}
+      y={quoteBar.y}
+      preview={quoteBar.text}
+      onClose={closeQuoteBar}
+      onCopy={() => {
+        void navigator.clipboard.writeText(quoteBar.text).catch(() => {});
+        closeQuoteBar();
+      }}
+      onQuote={() => {
+        window.dispatchEvent(
+          new CustomEvent("grok-add-quote", {
+            detail: {
+              text: quoteBar.text,
+              sourceMessageId: quoteBar.sourceMessageId,
+            },
+          }),
+        );
+        window.getSelection()?.removeAllRanges();
+        closeQuoteBar();
+      }}
+    />
+  ) : null;
+
   if (items.length === 0 && perms.length === 0) {
     return (
       <div className="empty-state empty-state-home">
@@ -1140,6 +1263,7 @@ export const MessageList = memo(function MessageList({
         />
       ) : null}
       <div ref={bottomRef} />
+      {quoteBarNode}
     </>
   );
 });

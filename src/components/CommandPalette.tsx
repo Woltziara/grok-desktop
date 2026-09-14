@@ -83,7 +83,7 @@ export function CommandPalette({
     if (hit.kind === "command") hit.command?.run();
     else if (hit.kind === "project" && hit.project) {
       onOpenProject?.(hit.project.cwd);
-    } else if (hit.session) {
+    } else if (hit.kind === "session") {
       onOpenSession({
         mode: "resume",
         sessionId: hit.session.id,

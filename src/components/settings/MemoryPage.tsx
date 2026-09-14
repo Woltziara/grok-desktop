@@ -53,7 +53,9 @@ export function MemoryPage({
         <div className="settings-row-text">
           <span className="settings-label">记住说过的事</span>
           <span className="settings-desc">
-            打开以后，Grok 会把你交代过的习惯记在这台电脑上，换一场对话还能用。关掉只是不再带上这些记忆，已经写下的条目还在。
+            {enabled
+              ? "已打开。Grok 会把你交代过的习惯记在这台电脑上，换一场对话还能用。"
+              : "打开以后，Grok 会把你交代过的习惯记在这台电脑上，换一场对话还能用。关掉只是不再带上这些记忆，已经写下的条目还在。"}
           </span>
           {offerRestart || needsRestart ? (
             <span className="settings-desc settings-note">
@@ -65,16 +67,20 @@ export function MemoryPage({
           type="checkbox"
           checked={enabled}
           disabled={busy || restarting}
+          aria-label={enabled ? "记忆已打开" : "记忆已关闭"}
           onChange={(e) => {
             const next = e.target.checked;
+            setEnabled(next);
+            setBusy(true);
+            setNote(null);
             void (async () => {
-              setBusy(true);
-              setNote(null);
               try {
                 const res = await window.grokDesktop.setMemoryEnabled(next);
                 setEnabled(Boolean(res.enabled));
                 setNeedsRestart(true);
+                await reload();
               } catch (err: unknown) {
+                setEnabled(!next);
                 setNote(err instanceof Error ? err.message : String(err));
               } finally {
                 setBusy(false);

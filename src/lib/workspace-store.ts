@@ -15,6 +15,7 @@ import {
 import {
   hasDraftContent,
   sessionOrgKey,
+  prependProjectOrder,
   stableProjectOrder,
 } from "../../shared/workspace-org.mjs";
 
@@ -37,6 +38,7 @@ export type SessionDraft = {
   cursor: number;
   highDetail?: boolean;
   files: DraftFile[];
+  quotes?: Array<{ id: string; text: string; sourceMessageId?: string }>;
   savedAt: number;
   cwd: string;
   title?: string;
@@ -217,6 +219,14 @@ export function setShowArchived(show: boolean) {
 
 export function setProjectOrder(order: string[]) {
   patchFlowState({ projectOrder: stableProjectOrder(order, []) });
+}
+
+/** Catalog-only: show a folder in the sidebar without opening it. */
+export function addProjectToOrder(cwd: string) {
+  patchFlowState((prev) => ({
+    ...prev,
+    projectOrder: prependProjectOrder(prev.projectOrder, cwd),
+  }));
 }
 
 export function togglePinnedProject(cwd: string) {

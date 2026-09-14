@@ -76,6 +76,15 @@ export async function importAttachmentFile(sourcePath, opts = {}) {
   if (!src) throw new Error("没有选择文件");
   if (!fs.existsSync(src)) throw new Error("文件不存在，请重新选择");
   const st = fs.statSync(src);
+  if (st.isDirectory()) {
+    return {
+      kind: "folder",
+      name: path.basename(src) || src,
+      path: src,
+      size: 0,
+      mimeType: "inode/directory",
+    };
+  }
   if (!st.isFile()) throw new Error("这不是一个文件");
   const name = path.basename(src);
   const ext = path.extname(name).toLowerCase();

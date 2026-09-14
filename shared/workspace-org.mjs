@@ -22,6 +22,7 @@ export function hasDraftContent(draft) {
   if (String(draft.text || "").trim()) return true;
   if (Array.isArray(draft.files) && draft.files.length > 0) return true;
   if (Array.isArray(draft.images) && draft.images.length > 0) return true;
+  if (Array.isArray(draft.quotes) && draft.quotes.length > 0) return true;
   return false;
 }
 
@@ -45,6 +46,22 @@ export function stableProjectOrder(order, known) {
   return out;
 }
 
+/** Put a newly added folder first without touching the live session. */
+export function prependProjectOrder(order, cwd) {
+  const k = pathFolderKey(cwd);
+  if (!k) return Array.isArray(order) ? order.slice() : [];
+  const rest = (Array.isArray(order) ? order : []).filter(
+    (p) => pathFolderKey(p) !== k,
+  );
+  return [String(cwd), ...rest];
+}
+
+/**
+ * @template T
+ * @param {T[]} projects
+ * @param {Record<string, number>} pinnedProjects
+ * @returns {T[]}
+ */
 export function organizeProjects(projects, pinnedProjects) {
   const list = Array.isArray(projects) ? projects.slice() : [];
   const pinned =
@@ -82,8 +99,10 @@ export function moveProjectOrder(order, activeKey, overKey) {
  * Pinned chats stay above the rest; archived chats drop out unless shown.
  * Last-message time still orders within each group so opening a chat does
  * not reshuffle the list.
- * @param {Array<{ id?: string, cwd?: string, lastMessageAt?: string, createdAt?: string }>} chats
+ * @template {{ id?: string, cwd?: string, lastMessageAt?: string | null, createdAt?: string | null }} T
+ * @param {T[]} chats
  * @param {{ pinned?: Record<string, number>, archived?: Record<string, number>, showArchived?: boolean }} org
+ * @returns {T[]}
  */
 export function organizeFolderChats(chats, org = {}) {
   const list = Array.isArray(chats) ? chats.slice() : [];
@@ -179,6 +198,37 @@ export function mergeDraftSessions(sessions, drafts) {
       isDraft: true,
     });
   }
+  return list;
+}
+
+/**
+ * Disk listing skips empty shells (no summary / no message yet).
+ * The live chat must still appear in the sidebar as soon as it is created.
+ */
+export function ensureLiveSessionInList(sessions, live) {
+  const id = String(live?.id || "").trim();
+  const cwd = String(live?.cwd || "").trim();
+  if (!id || !cwd) return Array.isArray(sessions) ? sessions.slice() : [];
+  const list = Array.isArray(sessions) ? sessions.slice() : [];
+  const key = sessionOrgKey(cwd, id);
+  if (list.some((row) => sessionOrgKey(row?.cwd, row?.id) === key)) {
+    return list;
+  }
+  const now = new Date().toISOString();
+  list.unshift({
+    id,
+    cwd,
+    title: String(live?.title || "").trim() || "新对话",
+    summary: null,
+    createdAt: now,
+    updatedAt: now,
+    lastActiveAt: now,
+    lastMessageAt: now,
+    numMessages: 0,
+    numChatMessages: 0,
+    modelId: null,
+    isLiveShell: true,
+  });
   return list;
 }
 

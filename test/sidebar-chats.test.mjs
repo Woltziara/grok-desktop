@@ -32,6 +32,16 @@ test("groupSidebarChats puts recent projects first and recents by last message",
   assert.equal(grouped.recent[0].id, "b");
 });
 
+test("projectOrder can list a folder with no chats yet", () => {
+  const grouped = groupSidebarChats({
+    sessions: [],
+    projectOrder: ["/tmp/new-folder"],
+  });
+  assert.equal(grouped.projects.length, 1);
+  assert.equal(grouped.projects[0].name, "new-folder");
+  assert.deepEqual(grouped.projects[0].chats, []);
+});
+
 test("visibleFolderChats hides extras until expanded", () => {
   const chats = [1, 2, 3, 4, 5].map((n) => ({ id: String(n) }));
   assert.equal(visibleFolderChats(chats, false, 4).length, 4);

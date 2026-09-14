@@ -2,10 +2,12 @@
 import type { TimelineItem } from "../vite-env";
 import {
   applySessionUpdate as applyShared,
+  applySessionInterjection as applyInterjectionShared,
   appendWorkedIfNeeded as appendWorkedShared,
   finalizeOpenTools as finalizeShared,
   uid as sharedUid,
   formatOptionLabel as formatShared,
+  shouldApplySessionInterjection as shouldApplyInterjectionShared,
 } from "../../shared/session-timeline.mjs";
 
 export function uid(prefix = "id") {
@@ -17,6 +19,20 @@ export function applySessionUpdate(
   params: any,
 ): TimelineItem[] {
   return applyShared(items, params);
+}
+
+export function applySessionInterjection(
+  items: TimelineItem[],
+  payload: { text?: unknown; interjectionId?: unknown },
+): TimelineItem[] {
+  return applyInterjectionShared(items, payload);
+}
+
+export function shouldApplySessionInterjection(
+  payload: { sessionId?: unknown } | null | undefined,
+  opts: { opening?: boolean; sessionId?: string | null },
+): boolean {
+  return shouldApplyInterjectionShared(payload, opts);
 }
 
 /** Close open tool cards when session/prompt returns or the user cancels. */

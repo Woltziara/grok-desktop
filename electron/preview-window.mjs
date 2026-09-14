@@ -2,7 +2,9 @@
  * Detachable Preview window (separate BrowserWindow + WebContentsView).
  * Lives on its own screen; not a column in the main GUI.
  *
- * Isolated session (no host cookies). http(s) only.
+ * Isolated session (no host-browser cookies). http(s) only.
+ * persist:grok-preview keeps *this window's* logins across app restarts.
+ * Do not point this partition at another browser's profile.
  */
 import {
   BrowserWindow,
@@ -29,6 +31,20 @@ import {
   formatNetworkDump,
   ingestWebRequest,
 } from "./preview-network.mjs";
+import {
+  bindPlaywrightNetwork,
+  ensureGuestPage,
+  getGuestPage,
+  isPlaywrightGuestLive,
+  pinGuestPage,
+  runGuestAction,
+  snapshotGuestPage,
+  snapshotPlaywrightPages,
+  unpinGuestPage,
+} from "./preview-playwright.mjs";
+import { debugLog } from "./debug-log.mjs";
+import { errorFields, writeCrashLog } from "./crash-log.mjs";
+import { shouldApplyDeviceEmulation } from "./preview-lifecycle.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +56,9 @@ export const VIEWPORTS = {
 };
 
 const TOOLBAR_FALLBACK = 52;
+
+/** Persistent Preview-only cookie jar. Not Edge, not the chat window. */
+export const PREVIEW_PARTITION = "persist:grok-preview";
 
 /** @type {import('electron').BrowserWindow | null} */
 let previewWin = null;
@@ -184,6 +203,7 @@ export function previewPublicState() {
     title: lastTitle,
     viewport: viewportId,
     loading,
+    aim: isPlaywrightGuestLive() ? "playwright" : "dom",
     canGoBack: Boolean(guestWc()?.navigationHistory?.canGoBack?.()),
     canGoForward: Boolean(guestWc()?.navigationHistory?.canGoForward?.()),
   };
@@ -209,15 +229,45 @@ function emitNetworkSoon() {
   }, 100);
 }
 
+function attachGuestLifecycle(wc) {
+  const onDomReady = () => {
+    if (networkLog.dclTs == null) networkLog.markDomContentLoaded();
+    emitNetworkSoon();
+  };
+  const onFinish = () => {
+    if (networkLog.loadTs == null) networkLog.markLoad();
+    emitNetworkSoon();
+  };
+  wc.on("dom-ready", onDomReady);
+  wc.on("did-finish-load", onFinish);
+  return () => {
+    wc.removeListener("dom-ready", onDomReady);
+    wc.removeListener("did-finish-load", onFinish);
+  };
+}
+
 /**
- * CDP Network + Page on the guest. One debugger client — do not open
- * guest DevTools while this is attached (Electron allows one attach).
+ * Prefer Playwright page events. Remote debugging occupies the Electron
+ * debugger slot, so CDP attach here is best-effort; webRequest is the fallback.
  * @param {import('electron').WebContents} wc
+ * @param {import('playwright-core').Page | null} [page]
  */
-function attachGuestNetwork(wc) {
+function attachGuestNetwork(wc, page = null) {
   detachNetwork();
   networkLog = new PreviewNetworkLog();
   networkHint = "";
+  const detachLife = attachGuestLifecycle(wc);
+
+  if (page && !page.isClosed()) {
+    const detachPw = bindPlaywrightNetwork(page, networkLog, emitNetworkSoon);
+    detachNetwork = () => {
+      detachPw();
+      detachLife();
+      detachNetwork = () => {};
+    };
+    return;
+  }
+
   const dbg = wc.debugger;
   const onMessage = (_event, method, params) => {
     networkLog.handleCdp(method, params);
@@ -258,20 +308,8 @@ function attachGuestNetwork(wc) {
     attachWebRequestFallback(wc.session);
   }
 
-  const onDomReady = () => {
-    if (networkLog.dclTs == null) networkLog.markDomContentLoaded();
-    emitNetworkSoon();
-  };
-  const onFinish = () => {
-    if (networkLog.loadTs == null) networkLog.markLoad();
-    emitNetworkSoon();
-  };
-  wc.on("dom-ready", onDomReady);
-  wc.on("did-finish-load", onFinish);
-
   detachNetwork = () => {
-    wc.removeListener("dom-ready", onDomReady);
-    wc.removeListener("did-finish-load", onFinish);
+    detachLife();
     detachWebRequest(wc.session);
     try {
       dbg.removeListener("message", onMessage);
@@ -363,7 +401,10 @@ function layoutGuest() {
 function applyViewport() {
   const wc = guestWc();
   const spec = VIEWPORTS[viewportId] || VIEWPORTS.fluid;
-  if (wc) {
+  const url = wc?.getURL?.() || lastUrl;
+  // Chromium can crash when emulation is applied to the blank guest target.
+  // Layout is still safe and lets chrome show immediately.
+  if (wc && shouldApplyDeviceEmulation(url, spec)) {
     try {
       if (spec.width) {
         wc.enableDeviceEmulation({
@@ -394,6 +435,8 @@ async function loadGuest(href) {
   loading = true;
   emitChrome();
   await wc.loadURL(parsed.href);
+  // A first real navigation is the earliest safe point for device emulation.
+  applyViewport();
 }
 
 function attachGuestHandlers(wc) {
@@ -443,7 +486,7 @@ function attachGuestHandlers(wc) {
 }
 
 function createGuest() {
-  const ses = session.fromPartition("grok-preview");
+  const ses = session.fromPartition(PREVIEW_PARTITION);
   const view = new WebContentsView({
     webPreferences: {
       session: ses,
@@ -468,14 +511,20 @@ function ownerWindow() {
   return null;
 }
 
+/** Bind screenshots and future MCP calls to an explicit live chat window. */
+export function claimPreviewOwner(win) {
+  if (win && !win.isDestroyed()) ownerWin = win;
+}
+
 export async function openPreviewWindow(opts = {}) {
   const owner = opts.owner || null;
-  if (owner && !owner.isDestroyed()) ownerWin = owner;
+  claimPreviewOwner(owner);
   const state = readState?.() || {};
   viewportId = VIEWPORTS[state.previewViewport] ? state.previewViewport : "fluid";
 
   if (!isLive()) {
     const bounds = preferredPreviewBounds(owner, state.previewBounds);
+    writeCrashLog("preview", "window-create", bounds);
     const win = new BrowserWindow({
       ...bounds,
       minWidth: 520,
@@ -500,8 +549,10 @@ export async function openPreviewWindow(opts = {}) {
     });
     win.on("move", persistSoon);
     win.on("closed", () => {
+      writeCrashLog("preview", "window-closed");
       persistNow();
       detachNetwork();
+      unpinGuestPage();
       if (netTimer) {
         clearTimeout(netTimer);
         netTimer = null;
@@ -524,18 +575,83 @@ export async function openPreviewWindow(opts = {}) {
     });
 
     const chromeFile = path.join(__dirname, "preview", "index.html");
-    await win.loadFile(chromeFile, { query: { theme: themeFromState() } });
+    try {
+      writeCrashLog("preview", "chrome-load");
+      await win.loadFile(chromeFile, { query: { theme: themeFromState() } });
+      // HWND must exist before WebContentsView attach — add-then-show can AV.
+      win.show();
+      win.focus();
+      writeCrashLog("preview", "chrome-shown");
+    } catch (err) {
+      writeCrashLog("preview", "chrome-load-failed", errorFields(err));
+      throw err;
+    }
+    /** @type {import('playwright-core').Page[] | null} */
+    let knownPages = null;
+    try {
+      knownPages = await snapshotPlaywrightPages();
+    } catch (err) {
+      networkHint = `Playwright attach failed (${err?.message || err}). Using DOM fallback.`;
+      debugLog("preview", "playwright-connect-failed", {
+        error: err?.message || String(err),
+      });
+    }
     guestView = createGuest();
+    writeCrashLog("preview", "guest-created");
     win.contentView.addChildView(guestView);
-    attachGuestNetwork(guestView.webContents);
-    win.show();
-    win.focus();
+    layoutGuest();
+    writeCrashLog("preview", "guest-attached");
+    const guestToken = `gp-${Date.now().toString(36)}`;
+    const stampGuest = () => {
+      const wc = guestView?.webContents;
+      if (!wc || wc.isDestroyed()) return Promise.resolve();
+      return wc
+        .executeJavaScript(
+          `window.__GROK_PREVIEW_GUEST=${JSON.stringify(guestToken)}`,
+        )
+        .catch(() => {});
+    };
+    await stampGuest();
+    guestView.webContents.on("dom-ready", () => {
+      void stampGuest();
+    });
+    let guestPage = null;
+    if (knownPages) {
+      try {
+        guestPage = await pinGuestPage(knownPages, async (page) => {
+          const mark = await page.evaluate(
+            () => window.__GROK_PREVIEW_GUEST,
+          );
+          return mark === guestToken;
+        });
+        debugLog("preview", "playwright-pinned", { url: guestPage.url() });
+      } catch (err) {
+        networkHint =
+          networkHint ||
+          `Playwright pin failed (${err?.message || err}). Using DOM fallback.`;
+        debugLog("preview", "playwright-pin-failed", {
+          error: err?.message || String(err),
+        });
+      }
+    }
+    const guestWcRef = guestView.webContents;
+    // Network/debugger attaches after the native window and guest target exist.
+    setImmediate(() => {
+      try {
+        if (!isLive() || !guestWcRef || guestWcRef.isDestroyed()) return;
+        attachGuestNetwork(guestWcRef, guestPage);
+        writeCrashLog("preview", "guest-network-attached");
+      } catch (err) {
+        writeCrashLog("preview", "guest-network-failed", errorFields(err));
+      }
+    });
   } else {
     if (previewWin.isMinimized()) previewWin.restore();
     previewWin.show();
     previewWin.focus();
   }
 
+  // applyViewport lays out the guest but deliberately skips emulation at blank.
   applyViewport();
 
   const wanted =
@@ -546,7 +662,13 @@ export async function openPreviewWindow(opts = {}) {
   if (wanted) {
     const parsed = normalizePreviewUrl(wanted);
     if (parsed.ok && parsed.href !== "about:blank") {
-      await loadGuest(parsed.href);
+      try {
+        writeCrashLog("preview", "guest-load", { url: parsed.href });
+        await loadGuest(parsed.href);
+      } catch (err) {
+        writeCrashLog("preview", "guest-load-failed", errorFields(err));
+        throw err;
+      }
     }
   } else {
     emitChrome();
@@ -606,6 +728,29 @@ export async function snapshotPreview() {
   const wc = guestWc();
   if (!wc) throw new Error("Preview is not open");
   await waitForPreviewSettled();
+  await ensureGuestPage(wc);
+  if (getGuestPage()) {
+    try {
+      const raw = await snapshotGuestPage();
+      const text = formatPreviewSnapshot({
+        url: raw.url || lastUrl,
+        title: raw.title || lastTitle,
+        yaml: raw.yaml,
+        engine: "playwright",
+      });
+      return {
+        text,
+        url: raw.url || lastUrl,
+        title: raw.title || lastTitle,
+        chars: text.length,
+        engine: "playwright",
+      };
+    } catch (err) {
+      debugLog("preview", "playwright-snapshot-failed", {
+        error: err?.message || String(err),
+      });
+    }
+  }
   const raw = await wc.executeJavaScript(PAGE_SNAPSHOT_SCRIPT, true);
   const text = formatPreviewSnapshot(raw || {});
   return {
@@ -613,16 +758,31 @@ export async function snapshotPreview() {
     url: raw?.url || lastUrl,
     title: raw?.title || lastTitle,
     chars: text.length,
+    engine: "dom",
   };
 }
 
 /**
- * @param {{ action?: string, ref?: string, selector?: string, name?: string, text?: string, value?: string, key?: string }} action
+ * @param {{ action?: string, ref?: string, selector?: string, name?: string, text?: string, value?: string, key?: string, x?: number, y?: number }} action
  */
 export async function runPreviewAction(action) {
   const wc = guestWc();
   if (!wc) throw new Error("Preview is not open");
   const act = action && typeof action === "object" ? action : {};
+  await ensureGuestPage(wc);
+  if (getGuestPage()) {
+    try {
+      const result = await runGuestAction(act);
+      if (result && result.ok === false) {
+        const err = new Error(result.error || "Preview action failed");
+        err.detail = result;
+        throw err;
+      }
+      return result || { ok: true, engine: "playwright" };
+    } catch (err) {
+      if (getGuestPage()) throw err;
+    }
+  }
   const result = await wc.executeJavaScript(previewActionScript(act), true);
   if (String(act.action || "") === "press") {
     const key = String(act.key || "Enter");

@@ -10,6 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applySessionUpdate,
+  applySessionInterjection,
   appendWorkedIfNeeded,
   collapseEchoedUserTurns,
   extractChunkText,
@@ -17,7 +18,51 @@ import {
   isBashBackgroundedRawOutput,
   looksLikeFinalToolResult,
   resolveToolUpdateStatus,
+  shouldApplySessionInterjection,
+  unwrapUserQueryEnvelope,
 } from "../shared/session-timeline.mjs";
+
+test("history unwraps every user_query and ignores image objects", () => {
+  const parsed = unwrapUserQueryEnvelope(
+    "prefix <user_query>第一句</user_query> middle <user_query>第二句</user_query>",
+  );
+  assert.equal(parsed.text, "第一句\n\n第二句");
+  assert.equal(unwrapUserQueryEnvelope({ type: "image", data: "x" }).text, "");
+});
+
+test("session interjection filters stale sessions and dedupes optimistic id", () => {
+  assert.equal(
+    shouldApplySessionInterjection(
+      { sessionId: "a" },
+      { opening: false, sessionId: "a" },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldApplySessionInterjection(
+      { sessionId: "b" },
+      { opening: false, sessionId: "a" },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldApplySessionInterjection(
+      { sessionId: "a" },
+      { opening: true, sessionId: "a" },
+    ),
+    false,
+  );
+  const seeded = [{ id: "i", kind: "user", text: "补一句", interjectionId: "i", at: 1 }];
+  assert.equal(
+    applySessionInterjection(seeded, { text: "补一句", interjectionId: "i" }),
+    seeded,
+  );
+  const appended = applySessionInterjection([], {
+    text: "补一句",
+    interjectionId: "new",
+  });
+  assert.equal(appended[0].marker, "interjection");
+});
 
 const writeStartDiff = {
   type: "diff",

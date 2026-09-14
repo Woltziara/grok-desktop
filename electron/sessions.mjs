@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { grokHomeDir } from "./grok-home.mjs";
 import { applySessionUpdate } from "../shared/session-timeline.mjs";
+import { stripWorkingKnowledgeFromUserText } from "../shared/working-knowledge/envelope.mjs";
 import {
   applyBackgroundUpdate,
   isBackgroundTaskUpdateKind,
@@ -79,11 +80,12 @@ export function displayTitleFromSummary(raw) {
 
 function textFromUserChunk(update) {
   const content = update?.content;
-  if (typeof content === "string") return content;
-  if (content && typeof content === "object" && typeof content.text === "string") {
-    return content.text;
+  let text = "";
+  if (typeof content === "string") text = content;
+  else if (content && typeof content === "object" && typeof content.text === "string") {
+    text = content.text;
   }
-  return "";
+  return stripWorkingKnowledgeFromUserText(text);
 }
 
 function isRealUserPrompt(text) {

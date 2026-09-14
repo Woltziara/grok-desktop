@@ -9,6 +9,7 @@ import { isCheckoutConflict } from "../lib/checkout";
 import type { CheckoutConflict, OpenProjectResult } from "../vite-env";
 import { basen } from "../lib/path-utils";
 import { uid } from "../lib/timeline";
+import { pickResumeTimeline } from "../../shared/resume-timeline.mjs";
 import type {
   AppInfo,
   AuthStatus,
@@ -42,6 +43,8 @@ export function useProjectSession(opts: {
     }>,
   ) => void;
   hydrateSessionUsage: (usage: import("../lib/usage").SessionUsage | null | undefined) => void;
+  hydrateSessionMode: (mode: string | null) => void;
+  syncParkedRequestsFromMain: () => void | Promise<void>;
   /** Mirror open permission gates from main (source of truth). */
   syncPermissionsFromMain: () => void | Promise<void>;
   hydrateFromInfo: (i: AppInfo) => void;
@@ -76,6 +79,8 @@ export function useProjectSession(opts: {
     history: TimelineItem[],
     gen?: number,
   ) => TimelineItem[];
+  stashLiveTimeline?: () => void;
+  takeCachedTimeline?: (sessionId?: string | null) => TimelineItem[] | undefined;
   /** Leave the project and return to AuthGate install when grok is missing. */
   onMissingBinary?: () => void | Promise<void>;
   /** Same checkout already open in another window — prompt for a worktree. */
@@ -93,6 +98,8 @@ export function useProjectSession(opts: {
     hydrateBackgroundTasks,
     hydrateScheduledTasks,
     hydrateSessionUsage,
+    hydrateSessionMode,
+    syncParkedRequestsFromMain,
     syncPermissionsFromMain,
     hydrateFromInfo,
     refreshAuth,
@@ -120,6 +127,8 @@ export function useProjectSession(opts: {
     abortOpening,
     finishOpening,
     applyOpenTimeline,
+    stashLiveTimeline,
+    takeCachedTimeline,
   } = opts;
 
   const applyOpenResult = useCallback(
@@ -150,6 +159,8 @@ export function useProjectSession(opts: {
       hydrateBackgroundTasks(res.backgroundTasks || []);
       hydrateScheduledTasks?.(res.scheduledTasks || []);
       hydrateSessionUsage(res.usage);
+      hydrateSessionMode(res.sessionMode ?? null);
+      void syncParkedRequestsFromMain();
       // Await so we do not mark online with a stale empty mirror.
       await syncPermissionsFromMain();
       setAgentCommands([]);
@@ -158,7 +169,11 @@ export function useProjectSession(opts: {
       promptQueueRef.current = [];
       sendNowRef.current = null;
 
-      const history = (res.history || []) as TimelineItem[];
+      const history = pickResumeTimeline(
+        res.history || [],
+        takeCachedTimeline?.(res.sessionId),
+        Boolean(res.turnOpen),
+      ) as TimelineItem[];
       if (res.backbone) setBackbone(res.backbone);
       const bb = res.backbone ?? (await refreshBackbone(res.cwd));
       const skillN = bb.ok ? bb.skills.length : "?";
@@ -221,6 +236,8 @@ export function useProjectSession(opts: {
       hydrateBackgroundTasks,
       hydrateScheduledTasks,
       hydrateSessionUsage,
+      hydrateSessionMode,
+      syncParkedRequestsFromMain,
       syncPermissionsFromMain,
       hydrateFromInfo,
       promptQueueRef,
@@ -244,6 +261,7 @@ export function useProjectSession(opts: {
       setAvailableModels,
       bindOpeningSession,
       applyOpenTimeline,
+      takeCachedTimeline,
     ],
   );
 
@@ -262,6 +280,10 @@ export function useProjectSession(opts: {
         return;
       }
       if (openingRef.current) return;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("grok-flush-draft"));
+      }
+      stashLiveTimeline?.();
 
       openingRef.current = true;
       const openGen = beginOpening(openOpts?.sessionId || null);
@@ -312,6 +334,8 @@ export function useProjectSession(opts: {
       abortOpening,
       finishOpening,
       clearSessionScoped,
+      stashLiveTimeline,
+      takeCachedTimeline,
       onCheckoutConflict,
       onMissingBinary,
       openingRef,
@@ -334,6 +358,10 @@ export function useProjectSession(opts: {
       }
       if (openingRef.current) return;
       // Switching chats parks the live agent — do not cancel the in-flight turn.
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("grok-flush-draft"));
+      }
+      stashLiveTimeline?.();
 
       openingRef.current = true;
       const openGen = beginOpening(sessionOpts.sessionId || null);
@@ -380,6 +408,7 @@ export function useProjectSession(opts: {
       finishOpening,
       busyRef,
       clearSessionScoped,
+      stashLiveTimeline,
       onMissingBinary,
       openingRef,
       project,

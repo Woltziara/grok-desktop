@@ -122,7 +122,8 @@ test("standalone clone is not a linked git worktree", async (t) => {
   const repo = path.join(tmp, "app");
   const copy = path.join(tmp, "standalone");
   initRepo(repo);
-  fs.cpSync(repo, copy, { recursive: true });
+  // Use Git to create a complete independent clone for this fixture.
+  git(tmp, ["clone", "--no-local", repo, copy]);
 
   clearWorktreeRootCache(repo);
   const roots = listLinkedWorktreeRoots(repo, { refresh: true });

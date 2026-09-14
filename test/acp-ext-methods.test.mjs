@@ -16,10 +16,43 @@ import {
   unwrapExtParams,
 } from "../shared/acp-rpc.mjs";
 import {
+  handleAskUserQuestion,
   handleExitPlanMode,
   handleFolderTrustRequest,
   handleMcpElicit,
 } from "../electron/acp-ext-methods.mjs";
+
+test("ask_user_question accepts nested extension params", async () => {
+  const emitter = new EventEmitter();
+  let seen = null;
+  let result = null;
+  emitter.on("user-question-request", ({ params, respond }) => {
+    seen = params;
+    respond({ type: "accepted", answers: { scope: "one" } });
+  });
+  await handleAskUserQuestion(
+    {
+      emitter,
+      respond: (_id, value) => {
+        result = value;
+      },
+    },
+    7,
+    {
+      params: {
+        questions: [
+          { id: "scope", question: "Scope?", options: [{ label: "One" }] },
+        ],
+      },
+    },
+  );
+  assert.equal(seen.questions.length, 1);
+  assert.deepEqual(result, {
+    outcome: "accepted",
+    answers: { scope: "one" },
+    partial_answers: {},
+  });
+});
 
 test("isFolderTrustMethod matches stdio underscore and nested names", () => {
   assert.equal(isFolderTrustMethod("x.ai/folder_trust/request"), true);
@@ -402,4 +435,3 @@ test("handleMcpElicit URL accept has no content", async () => {
   );
   assert.deepEqual(result, { outcome: "accept" });
 });
-

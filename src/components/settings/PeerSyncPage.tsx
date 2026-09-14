@@ -137,11 +137,13 @@ export function PeerSyncPage({
   return (
     <section className="settings-section">
       <p className="settings-desc settings-lead">
-        出差带着笔记本走几天，回来两边会对不上。这里把
+        出差带着笔记本走几天，回来两边会对不上。对齐只动
         <strong> Grok 的家</strong>（对话、记忆、技能、设置）和整个
         <strong> Projects 文件夹</strong>
-        对齐：先对比，再用新的盖掉旧的。只在一台电脑上有的文件会留下，不删。
-        登录账号要单独送，不会跟着对齐一起被盖掉。
+        ：先对比，再用新的盖掉旧的。只在一台电脑上有的文件会留下，不删。
+        登录和这套软件本身都要单独送，不会跟着对齐走。
+        Grok Desktop 的源码和测试副本不参加文件对齐，避免旧版本被重新拷回。
+        工作认识目前保留在本机，不属于此处的同步范围。
       </p>
       <div className="settings-row settings-row-stack">
         <div className="settings-row-text">
@@ -243,7 +245,7 @@ export function PeerSyncPage({
               setBusy(null);
               if (res?.ok) {
                 setNote(
-                  ("preview" in res && res.preview) ||
+                  ("preview" in res && typeof res.preview === "string" ? res.preview : "") ||
                     `已经送到${peerLabel}。`,
                 );
                 await reload();
@@ -282,7 +284,7 @@ export function PeerSyncPage({
               setBusy(null);
               if (res?.ok) {
                 setNote(
-                  ("preview" in res && res.preview) ||
+                  ("preview" in res && typeof res.preview === "string" ? res.preview : "") ||
                     `已经拿到${peerLabel}的登录。`,
                 );
                 await reload();
@@ -333,6 +335,43 @@ export function PeerSyncPage({
           </ul>
         </div>
       ) : null}
+
+      <div className="settings-row">
+        <div className="settings-row-text">
+          <span className="settings-label">把这套软件送到对面</span>
+          <span className="settings-desc">
+            把「应用程序」里现在这套 Grok Desktop 整包换到{peerLabel}。对话、项目、登录都不会跟着走。对面开着的窗口会先关掉再打开新的。
+          </span>
+        </div>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={Boolean(busy) || !status?.sshReady}
+          onClick={() => {
+            if (
+              !window.confirm(
+                `把这边的 Grok Desktop 整包换到${peerLabel}？对面正在开着的会先关掉。对话和登录不会被盖掉。`,
+              )
+            ) {
+              return;
+            }
+            void (async () => {
+              setBusy("push-app");
+              const res = await run(() => window.grokDesktop.copyAppToPeer());
+              setBusy(null);
+              if (res?.ok) {
+                setNote(
+                  ("preview" in res && typeof res.preview === "string" ? res.preview : "") ||
+                    `已经把软件送到${peerLabel}。`,
+                );
+                await reload();
+              }
+            })();
+          }}
+        >
+          {busy === "push-app" ? "送过去…" : "送到对面"}
+        </button>
+      </div>
 
       <div className="settings-row">
         <div className="settings-row-text">

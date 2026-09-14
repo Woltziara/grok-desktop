@@ -10,12 +10,14 @@ import {
   distanceFromBottom,
   isNearBottom,
   shouldHonorScrollPosition,
+  stickAfterScroll,
   wheelWantsEarlierContent,
 } from "../../shared/stick-to-bottom.mjs";
 import {
   canApplyReadingRestore,
   shouldSaveReadingPosition,
 } from "../../shared/reading-restore.mjs";
+import { scrollTopToAlignStart } from "../../shared/reveal-turn.mjs";
 
 function fromBottom(el: HTMLElement): number {
   return distanceFromBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
@@ -28,7 +30,8 @@ function nearBottom(el: HTMLElement): boolean {
 /**
  * Chat-style stick-to-bottom for a scroll container.
  *
- * - Follows the tail while the user is pinned (after send, or back at bottom).
+ * - Follows the tail while the user is pinned (back at bottom).
+ * - After send, park on the new turn's head (revealStart) instead of the tail.
  * - Wheel / trackpad / touch toward earlier content unpins immediately,
  *   even while a fast stream is writing scrollTop.
  * - Re-pins only when the user returns to the tail, or on pinToBottom().
@@ -45,8 +48,10 @@ export function useStickToBottom(
     onScrollPosition?: (top: number, stuck: boolean) => void;
   },
 ): {
-  /** Call when the user intentionally wants the live tail (e.g. send). */
+  /** Call when the user intentionally wants the live tail. */
   pinToBottom: () => void;
+  /** Park the viewport on a turn's head; do not chase the live tail. */
+  revealStart: (target: HTMLElement) => void;
   stuckToBottom: boolean;
   hasNewContent: boolean;
   clearNewContent: () => void;
@@ -61,6 +66,8 @@ export function useStickToBottom(
   const [hasNewContent, setHasNewContent] = useState(false);
   const seenResetRef = useRef(resetKey);
   const stickRef = useRef(true);
+  /** Parked on a turn head after send — grow below, do not chase the tail. */
+  const holdRevealRef = useRef(false);
   const pendingRestoreRef = useRef<number | null>(null);
   /**
    * Nested stick writes during fast streams: count (not bool) so an early
@@ -74,6 +81,7 @@ export function useStickToBottom(
     if (!stickRef.current) return;
     ignoreScrollRef.current += 1;
     el.scrollTop = el.scrollHeight;
+    onScrollPositionRef.current?.(el.scrollTop, true);
     // Double rAF: let the browser dispatch scroll events from this write first.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -83,11 +91,33 @@ export function useStickToBottom(
   }, [scrollerRef]);
 
   const pinToBottom = useCallback(() => {
+    holdRevealRef.current = false;
     stickRef.current = true;
     setStuckToBottom(true);
     setHasNewContent(false);
     scrollToBottom();
   }, [scrollToBottom]);
+
+  const revealStart = useCallback((target: HTMLElement) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    holdRevealRef.current = true;
+    stickRef.current = false;
+    pendingRestoreRef.current = null;
+    setStuckToBottom(false);
+    setHasNewContent(false);
+    const nextTop = scrollTopToAlignStart(
+      el.scrollTop,
+      target.getBoundingClientRect().top,
+      el.getBoundingClientRect().top,
+    );
+    ignoreScrollRef.current += 1;
+    el.scrollTop = nextTop;
+    onScrollPositionRef.current?.(el.scrollTop, false);
+    requestAnimationFrame(() => {
+      ignoreScrollRef.current = Math.max(0, ignoreScrollRef.current - 1);
+    });
+  }, [scrollerRef]);
 
   const clearNewContent = useCallback(() => setHasNewContent(false), []);
 
@@ -100,10 +130,16 @@ export function useStickToBottom(
       if (!shouldHonorScrollPosition(ignoreScrollRef.current, distance)) {
         return;
       }
-      const stuck = isNearBottom(distance);
-      stickRef.current = stuck;
-      setStuckToBottom(stuck);
-      if (stuck) setHasNewContent(false);
+      const nextPin = stickAfterScroll(stickRef.current, distance);
+      if (nextPin) {
+        if (!stickRef.current) holdRevealRef.current = false;
+        stickRef.current = true;
+        setStuckToBottom(true);
+        setHasNewContent(false);
+      } else if (!holdRevealRef.current) {
+        stickRef.current = false;
+        setStuckToBottom(false);
+      }
       if (
         shouldSaveReadingPosition({
           ignoreScroll: ignoreScrollRef.current > 0,
@@ -111,7 +147,7 @@ export function useStickToBottom(
           scrollTop: el.scrollTop,
         })
       ) {
-        onScrollPositionRef.current?.(el.scrollTop, stuck);
+        onScrollPositionRef.current?.(el.scrollTop, stickRef.current);
       }
     };
 
@@ -119,10 +155,14 @@ export function useStickToBottom(
       if (wheelWantsEarlierContent(event.deltaY)) {
         const nested = nestedScroller(event.target, el);
         if (nested && nested.scrollTop > 0) return;
+        holdRevealRef.current = false;
         stickRef.current = false;
         return;
       }
-      if (nearBottom(el)) stickRef.current = true;
+      if (nearBottom(el)) {
+        holdRevealRef.current = false;
+        stickRef.current = true;
+      }
     };
 
     let touchY: number | null = null;
@@ -133,12 +173,16 @@ export function useStickToBottom(
       const y = event.touches[0]?.clientY;
       if (touchY == null || y == null) return;
       // Finger moving down → earlier content.
-      if (y - touchY > 4) stickRef.current = false;
+      if (y - touchY > 4) {
+        holdRevealRef.current = false;
+        stickRef.current = false;
+      }
       touchY = y;
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "PageUp" || event.key === "Home" || event.key === "ArrowUp") {
+        holdRevealRef.current = false;
         stickRef.current = false;
       }
     };
@@ -151,6 +195,7 @@ export function useStickToBottom(
     const saved = restoreTopRef.current;
     if (typeof saved === "number" && saved > 8) {
       pendingRestoreRef.current = saved;
+      holdRevealRef.current = false;
       stickRef.current = false;
       setStuckToBottom(false);
       setHasNewContent(false);
@@ -163,6 +208,7 @@ export function useStickToBottom(
       }
     } else {
       pendingRestoreRef.current = null;
+      holdRevealRef.current = false;
       stickRef.current = true;
       setStuckToBottom(true);
     }
@@ -195,6 +241,10 @@ export function useStickToBottom(
       }
       return;
     }
+    if (holdRevealRef.current) {
+      seenResetRef.current = resetKey;
+      return;
+    }
     if (!stickRef.current) {
       if (seenResetRef.current === resetKey) setHasNewContent(true);
       else seenResetRef.current = resetKey;
@@ -204,7 +254,13 @@ export function useStickToBottom(
     scrollToBottom();
   }, [contentKey, resetKey, scrollToBottom, scrollerRef]);
 
-  return { pinToBottom, stuckToBottom, hasNewContent, clearNewContent };
+  return {
+    pinToBottom,
+    revealStart,
+    stuckToBottom,
+    hasNewContent,
+    clearNewContent,
+  };
 }
 
 function nestedScroller(target: EventTarget | null, root: HTMLElement): HTMLElement | null {

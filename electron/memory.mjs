@@ -54,6 +54,13 @@ export function setMemoryEnabled(enabled) {
   const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, next, "utf8");
   fs.renameSync(tmp, p);
+  if (enabled) {
+    try {
+      fs.mkdirSync(memoryRoot(), { recursive: true });
+    } catch {
+      /* listing still works if mkdir fails */
+    }
+  }
   return getMemoryEnabled();
 }
 

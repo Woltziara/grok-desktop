@@ -59,6 +59,20 @@ export function CopyMenu({ markdown }: { markdown: string }) {
       >
         复制 Markdown
       </MenuItem>
+      <MenuSep />
+      <MenuItem
+        onSelect={() => {
+          const sel = window.getSelection()?.toString().replace(/\u00a0/g, " ").trim();
+          const text = sel || payload.plain;
+          if (!text) return;
+          window.dispatchEvent(
+            new CustomEvent("grok-add-quote", { detail: { text } }),
+          );
+          flash("已引用");
+        }}
+      >
+        引用到输入框
+      </MenuItem>
       {payload.tables.length ? (
         <>
           <MenuSep />

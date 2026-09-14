@@ -43,3 +43,22 @@ export function shouldHonorScrollPosition(
   if (ignoreCount <= 0) return true;
   return distance > farPx;
 }
+
+/**
+ * After the user unpins (wheel/PageUp), stay unpinned in the near-bottom
+ * band so streaming stick writes cannot yank them back. Re-pin only at the
+ * real tail, or if they were already following.
+ */
+export const TAIL_PX = 4;
+
+export function stickAfterScroll(
+  pinned,
+  distance,
+  nearPx = NEAR_BOTTOM_PX,
+  tailPx = TAIL_PX,
+) {
+  const d = Number(distance) || 0;
+  if (d > nearPx) return false;
+  if (pinned) return true;
+  return d <= tailPx;
+}

@@ -20,7 +20,7 @@ export function PlanApprovalDialog({
   onRespond: (
     reqId: string,
     decision:
-      | { type: "approved" }
+      | { type: "approved"; feedback?: string }
       | { type: "request_changes"; feedback: string }
       | { type: "abandoned" },
   ) => void;
@@ -134,6 +134,17 @@ export function PlanApprovalDialog({
                 onClick={() => setMode("review")}
               >
                 Back
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={!feedback.trim()}
+                onClick={() => onRespond(request.reqId, {
+                  type: "approved",
+                  feedback: feedback.trim(),
+                })}
+              >
+                批准并附上意见
               </button>
               <button
                 type="button"

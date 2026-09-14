@@ -253,7 +253,8 @@ export function mergeMcpLiveStatus(servers, liveRows = [], opts = {}) {
 
 /**
  * Patch one card from `x.ai/mcp/server_status`.
- * @param {Record<string, any>} server
+ * @template {Record<string, any>} T
+ * @param {T} server
  * @param {Record<string, any>} payload
  */
 export function applyMcpServerStatus(server, payload) {

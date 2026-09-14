@@ -1,100 +1,5 @@
 /// <reference types="vite/client" />
 
-declare module "../../shared/session-timeline.mjs" {
-  export function uid(prefix?: string): string;
-  export function isOpenToolStatus(status: unknown): boolean;
-  export function isTerminalToolStatus(status: unknown): boolean;
-  export function isBashBackgroundedRawOutput(rawOut: any): boolean;
-  export function looksLikeFinalToolResult(update: any): boolean;
-  export function resolveToolUpdateStatus(
-    update: any,
-    previousStatus?: string | null,
-  ): string;
-  export function finalizeOpenTools(items: any[], status?: string): any[];
-  export function appendWorkedIfNeeded(
-    items: any[],
-    at: number,
-    elapsedMs?: unknown,
-  ): any[];
-  export function applySessionUpdate(items: any[], params: any): any[];
-  export function formatOptionLabel(
-    optionId: string,
-    name?: string,
-  ): string;
-}
-
-declare module "../../shared/open-timeline.mjs" {
-  export function createOpenGate(): {
-    opening: boolean;
-    gen: number;
-    buffer: any[];
-    sessionId: string | null;
-    afterSeq: number | null;
-  };
-  export function eventSessionId(params: any): string;
-  export function eventDesktopSeq(params: any): number | null;
-  export function filterLiveEvents(
-    events: any[],
-    opts?: { sessionId?: string | null; afterSeq?: number | null },
-  ): any[];
-  export function beginOpen(gate: any, sessionId?: string | null): number;
-  export function bindOpenSession(
-    gate: any,
-    sessionId?: string | null,
-    afterSeq?: number | null,
-  ): void;
-  export function enqueueLiveUpdate(
-    gate: any,
-    params: any,
-  ): "apply" | "buffer" | "stale";
-  export function abortOpen(gate: any, gen?: number): void;
-  export function applyBufferedUpdates(
-    items: any[],
-    events: any[],
-    gateOrOpts?: { sessionId?: string | null; afterSeq?: number | null },
-  ): any[];
-  export function replayLiveOntoHistory(
-    banner: any,
-    history: any[],
-    liveEvents: any[],
-    sessionId?: string | null,
-    afterSeq?: number | null,
-  ): any[];
-  export function drainOpenTimeline(
-    gate: any,
-    opts?: { banner?: any; history?: any[]; gen?: number },
-  ): { items: any[]; events: any[]; sessionId: string | null; gen: number } | null;
-  export function finishOpen(gate: any, gen?: number): any[];
-  export function commitOpenTimeline(
-    gate: any,
-    opts?: { banner?: any; history?: any[]; gen?: number },
-  ): { items: any[]; events: any[]; sessionId: string | null; gen: number } | null;
-}
-
-declare module "../../shared/usage.mjs" {
-  export type SessionUsage = {
-    turns: number;
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-    lastContextTokens: number;
-    cachedReadTokens: number;
-    reasoningTokens: number;
-    modelCalls: number;
-    costUsdTicks: number;
-    lastModel?: string;
-  };
-  export function emptyUsage(): SessionUsage;
-  export function applyUsageUpdate(
-    prev: SessionUsage,
-    params: any,
-  ): SessionUsage;
-  export function formatTokens(n: number): string;
-  export function formatCostUsd(ticks: number): string | null;
-  export function formatUsageBar(u: SessionUsage): string;
-  export function formatUsageTooltip(u: SessionUsage): string;
-}
-
 export type PermissionOutcome = {
   outcome: {
     outcome: "selected" | "cancelled";
@@ -120,6 +25,9 @@ export type TimelineItem =
       images?: TimelineImage[];
       /** Set when UI inserts the bubble before ACP echoes it */
       optimistic?: boolean;
+      /** Mid-turn steer, or a follow-up after a cancelled turn. */
+      marker?: "interjection" | "interrupt";
+      interjectionId?: string;
       at: number;
     }
   | { id: string; kind: "assistant"; text: string; at: number }
@@ -429,6 +337,7 @@ export type OpenProjectResult = {
   modelName?: string | null;
   /** Models advertised on session/new|load — empty when the agent omits them */
   availableModels?: AvailableModel[];
+  sessionMode?: string | null;
   history?: TimelineItem[];
   /** Agent update seq at history snapshot; replay only later events. */
   historySeq?: number;
@@ -465,6 +374,10 @@ export type OpenProjectResult = {
 
 export type AppInfo = {
   version: string;
+  pid: number;
+  executable: string;
+  appPath: string;
+  sessionData: string;
   platform: string;
   grokBinary: string;
   grokHome: string;
@@ -552,6 +465,53 @@ export type FileReadResult = {
   size: number;
 };
 
+export type WorkingKnowledgeItem = {
+  id: string;
+  kind: string;
+  status?: string;
+  epistemic?: string;
+  text: string;
+  analysis?: string;
+  scope?: string;
+  basis?: string;
+  version?: number;
+  source?: { type?: string; pointer?: string; quote?: string };
+};
+
+export type WorkingKnowledgeSnapshot = {
+  enabled: boolean;
+  root: string;
+  currentObjectId: string;
+  sessionObjectId: string | null;
+  activeObjectId: string;
+  activeObjectTitle: string;
+  objects: Array<{ id: string; title: string; test?: boolean }>;
+  version: number;
+  items: WorkingKnowledgeItem[];
+  inbox: Array<{
+    id: string;
+    text: string;
+    sessionId?: string;
+    cwd?: string;
+    status?: string;
+    recordedAt?: string;
+    at?: string;
+  }>;
+  probeArmed: boolean;
+  lastReceipt: Record<string, unknown> | null;
+  cwd: string;
+  sessionId: string;
+};
+
+export type WorkingKnowledgeMutation = {
+  ok: boolean;
+  error?: string;
+  currentVersion?: number;
+  written?: Array<{ id: string; kind: string }>;
+  snapshot?: WorkingKnowledgeSnapshot;
+  duplicate?: boolean;
+};
+
 declare global {
   interface Window {
     grokDesktop: {
@@ -559,6 +519,9 @@ declare global {
       windowReady: () => void;
       getInfo: () => Promise<AppInfo>;
       pickProject: () => Promise<string | null>;
+      addRecentProject?: (
+        cwd: string,
+      ) => Promise<{ ok: boolean; cwd: string; recentProjects: string[] }>;
       openProject: (
         cwd: string,
         opts?: {
@@ -616,10 +579,27 @@ declare global {
       prompt: (
         text: string,
         opts?: {
+          origin?: "user" | "followup";
           images?: PromptImage[];
           imageQuality?: "compact" | "high";
         },
       ) => Promise<unknown>;
+      interject: (
+        text: string,
+        opts?: {
+          images?: PromptImage[];
+          imageQuality?: "compact" | "high";
+          interjectionId?: string;
+        },
+      ) => Promise<
+        | { ok: true; status?: string; interjectionId: string }
+        | { ok: false; reason: "unsupported"; interjectionId: string }
+      >;
+      setSessionMode: (modeId: string) => Promise<{
+        agentSynced: boolean;
+        currentModeId: string | null;
+        error?: string;
+      }>;
       cancel: () => Promise<boolean>;
       compact: (hint?: string) => Promise<unknown>;
       rewind: (
@@ -639,6 +619,10 @@ declare global {
       ) => Promise<{ allowWritesThisSession: boolean }>;
       /** Open Approvals still held in main (after HMR / reload) */
       listPendingPermissions: () => Promise<PermissionRequest[]>;
+      listPendingPlanApprovals: () => Promise<Array<{ reqId: string; params: any }>>;
+      listPendingFolderTrust: () => Promise<Array<{ reqId: string; params: any }>>;
+      listPendingUserQuestions: () => Promise<Array<{ reqId: string; params: any }>>;
+      listPendingMcpElicits: () => Promise<Array<{ reqId: string; params: any }>>;
       respondPlanApproval: (
         reqId: string,
         decision: {
@@ -718,6 +702,34 @@ declare global {
       }>;
       setMemoryEnabled: (value: boolean) => Promise<{ enabled: boolean }>;
       deleteMemoryEntry: (entryId: string) => Promise<{ ok: boolean }>;
+      workingKnowledgeStatus: (opts?: {
+        sessionId?: string | null;
+        cwd?: string | null;
+      }) => Promise<WorkingKnowledgeSnapshot>;
+      setWorkingKnowledgeEnabled: (
+        value: boolean,
+      ) => Promise<{ enabled: boolean }>;
+      setWorkingKnowledgeObject: (payload: {
+        objectId: string;
+        sessionId?: string | null;
+        cwd?: string | null;
+      }) => Promise<WorkingKnowledgeSnapshot>;
+      correctWorkingKnowledge: (payload: {
+        objectId: string;
+        id?: string;
+        text: string;
+        analysis?: string;
+        scope?: string;
+        sessionId?: string | null;
+        cwd?: string | null;
+      }) => Promise<WorkingKnowledgeMutation>;
+      withdrawWorkingKnowledge: (payload: {
+        objectId: string;
+        id: string;
+        sessionId?: string | null;
+        cwd?: string | null;
+      }) => Promise<WorkingKnowledgeMutation>;
+      armWorkingKnowledgeProbe: () => Promise<WorkingKnowledgeSnapshot>;
       getBilling: () => Promise<{
         ok: boolean;
         line: string;
@@ -795,6 +807,14 @@ declare global {
         peer?: AccountRow | null;
         status?: AuthStatus;
       }>;
+      copyAppToPeer: () => Promise<{
+        ok: boolean;
+        error?: string;
+        needPair?: boolean;
+        preview?: string;
+        label?: string;
+        version?: string | null;
+      }>;
       setAllowPrerelease: (value: boolean) => Promise<boolean>;
       setDebugLogging: (
         value: boolean,
@@ -827,6 +847,8 @@ declare global {
       showItem: (path: string) => Promise<void>;
       pickFile: () => Promise<string | null>;
       pickFiles?: () => Promise<string[]>;
+      pickFolder?: () => Promise<string | null>;
+      pathForFile?: (file: File) => string;
       importAttachment?: (path: string) => Promise<{
         kind: string;
         name: string;

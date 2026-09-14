@@ -15,11 +15,15 @@ import {
   PREVIEW_MCP_TOOLS,
   SCREENSHOT_DISABLED_TEXT,
   callPreviewTool,
+  PREVIEW_OWNER_HEADER,
   previewMcpHttpServers,
+  previewOwnerHeaderStamped,
+  previewOwnerIdFromHeaders,
 } from "../electron/preview-mcp-tools.mjs";
 import {
   dispatchPreviewApi,
   previewApiRecognizes,
+  previewRequestOwner,
 } from "../electron/preview-api.mjs";
 
 test("normalizePreviewUrl adds http when scheme is missing", () => {
@@ -43,6 +47,24 @@ test("normalizePreviewUrl rejects file and javascript", () => {
 test("normalizePreviewUrl rejects empty", () => {
   assert.equal(normalizePreviewUrl("").ok, false);
   assert.equal(normalizePreviewUrl("   ").ok, false);
+});
+
+test("formatPreviewSnapshot wraps Playwright aria YAML", () => {
+  const text = formatPreviewSnapshot({
+    url: "http://localhost:5173/",
+    title: "Demo",
+    yaml: `- heading "Welcome" [level=1] [ref=e1]
+- textbox "Email" [ref=e2]
+- button "Save" [ref=e3]`,
+    engine: "playwright",
+  });
+  assert.match(text, /URL: http:\/\/localhost:5173\//);
+  assert.match(text, /Title: Demo/);
+  assert.match(text, /Snapshot:/);
+  assert.match(text, /\[ref=e2\]/);
+  assert.match(text, /preview_hover/);
+  assert.match(text, /f1e12/);
+  assert.doesNotMatch(text, /Visible text:/);
 });
 
 test("formatPreviewSnapshot is compact text", () => {
@@ -86,6 +108,7 @@ test("MCP advertises HTTP snapshot tools, not screenshot", () => {
   const names = PREVIEW_MCP_TOOLS.map((t) => t.name);
   assert.ok(names.includes("preview_snapshot"));
   assert.ok(names.includes("preview_open"));
+  assert.ok(names.includes("preview_hover"));
   assert.equal(names.includes("preview_screenshot"), false);
   const servers = previewMcpHttpServers({
     url: "http://127.0.0.1:9",
@@ -95,6 +118,31 @@ test("MCP advertises HTTP snapshot tools, not screenshot", () => {
   assert.equal(servers[0].type, "http");
   assert.equal(servers[0].name, "desktop-preview");
   assert.equal(previewMcpHttpServers({}).length, 0);
+});
+
+test("Preview MCP stamps an owner and a stamped stale owner cannot fall back to focus", () => {
+  const servers = previewMcpHttpServers(
+    { url: "http://127.0.0.1:9", token: "t" },
+    42,
+  );
+  assert.deepEqual(servers[0].headers, [
+    { name: "Authorization", value: "Bearer t" },
+    { name: PREVIEW_OWNER_HEADER, value: "42" },
+  ]);
+  const headers = { "x-grok-desktop-window": "42" };
+  assert.equal(previewOwnerHeaderStamped(headers), true);
+  assert.equal(previewOwnerIdFromHeaders(headers), 42);
+  const focused = { id: "focused" };
+  assert.equal(
+    previewRequestOwner({ owner: null, ownerStamped: true }, () => focused),
+    null,
+  );
+  assert.equal(
+    previewRequestOwner({ owner: null, ownerStamped: false }, () => focused),
+    focused,
+  );
+  assert.equal(previewOwnerHeaderStamped({ [PREVIEW_OWNER_HEADER]: "bad" }), true);
+  assert.equal(previewOwnerIdFromHeaders({ [PREVIEW_OWNER_HEADER]: "bad" }), null);
 });
 
 test("preview_screenshot does not dispatch a JPEG capture", async () => {
@@ -118,6 +166,7 @@ test("preview_screenshot does not dispatch a JPEG capture", async () => {
 
 test("dispatchPreviewApi POST /screenshot 404s with no JPEG data", async () => {
   assert.equal(previewApiRecognizes("POST", "/snapshot"), true);
+  assert.equal(previewApiRecognizes("POST", "/hover"), true);
   assert.equal(previewApiRecognizes("POST", "/screenshot"), false);
   const err = await dispatchPreviewApi({
     method: "POST",
@@ -203,12 +252,14 @@ test("desktop-preview skill names the Preview MCP tools", () => {
   assert.match(skill, /desktop-preview__preview_open/);
   assert.match(skill, /desktop-preview__preview_fill/);
   assert.match(skill, /preview_fill_form/);
+  assert.match(skill, /desktop-preview__preview_hover/);
   assert.match(skill, /desktop-preview__preview_network/);
   assert.match(skill, /PowerShell/);
   assert.match(skill, /cloakbrowser/i);
-  assert.match(skill, /Read text/);
+  assert.match(skill, /accessibility/);
   assert.match(skill, /Send screenshot/);
   assert.match(skill, /Do not call `preview_screenshot`/);
+  assert.match(skill, /second browser/i);
 });
 
 test("user capture caption names the URL", () => {

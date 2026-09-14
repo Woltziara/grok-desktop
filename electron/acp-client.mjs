@@ -22,6 +22,7 @@ import { AcpTerminalManager } from "./acp-terminals.mjs";
 import { expandUserPath, resolveProjectPath } from "./path-safety.mjs";
 import { readFileForAcp } from "./fs-content.mjs";
 import { sessionsRootForCwd } from "./sessions.mjs";
+import { extractChunkText } from "../shared/session-timeline.mjs";
 import { desktopPreviewMcpServers } from "./preview-mcp.mjs";
 import { PREVIEW_SESSION_RULE } from "./preview-mcp-protocol.mjs";
 import {
@@ -41,6 +42,10 @@ import { rejectPendingByMethod } from "../shared/cancel-pending.mjs";
 import { interpretAcpPing } from "../shared/agent-ping.mjs";
 import { compressPromptImage } from "./image-compress.mjs";
 import {
+  consumeCompletedAcpPrompt,
+  prepareAcpPrompt,
+} from "./acp-prompt-lifecycle.mjs";
+import {
   classifyInboundMessage,
   compactConversationAttempts,
   billingAttempts,
@@ -59,6 +64,7 @@ import {
   isMcpElicitMethod,
   mcpAuthTriggerAttempts,
   mcpSessionListAttempts,
+  unwrapExtMethodResult,
   unwrapMcpExtNotification,
   createOnceResponder,
   isFsReadMethod,
@@ -70,6 +76,18 @@ import {
   formatAcpError,
   acpClientCapabilities,
 } from "../shared/acp-rpc.mjs";
+import {
+  interjectAcceptedResult,
+  interjectAttempts,
+  interjectFromAttemptErrors,
+  isInterjectMethodMissing,
+  unwrapSessionInterjection,
+} from "../shared/acp-interject.mjs";
+import {
+  currentModeIdFromUpdate,
+  rememberSessionMode,
+  setSessionModeParams,
+} from "../shared/session-mode.mjs";
 import { handleAcpPermissionRequest } from "./acp-protocol.mjs";
 import { mapMcpSessionCatalog } from "../shared/mcp-status.mjs";
 import {
@@ -80,11 +98,11 @@ import {
 } from "./acp-ext-methods.mjs";
 import { shouldAutoTrustFolder } from "./desktop-worktrees.mjs";
 import { debugLog } from "./debug-log.mjs";
+import { errorFields, writeCrashLog } from "./crash-log.mjs";
 import {
   scheduledInjectFromInbound,
   scheduledTaskUpdateFromInbound,
 } from "../shared/scheduled-tasks.mjs";
-
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const INIT_TIMEOUT_MS = 60_000;
 const LOAD_TIMEOUT_MS = 90_000;
@@ -209,6 +227,9 @@ export class GrokAcpClient extends EventEmitter {
      */
     reasoningEffort = DEFAULT_REASONING_EFFORT,
     clientVersion = "0.1.2",
+    windowId = null,
+    /** Internal ACP prompt boundary injection for deterministic client tests. */
+    promptLifecycle = null,
   } = {}) {
     super();
     this.cwd = cwd || process.cwd();
@@ -221,6 +242,16 @@ export class GrokAcpClient extends EventEmitter {
     this.sandboxTerminal = sandboxTerminal !== false;
     this.reasoningEffort = normalizeReasoningEffort(reasoningEffort);
     this.clientVersion = clientVersion;
+    this.windowId = windowId;
+    this._promptLifecycle =
+      promptLifecycle &&
+      typeof promptLifecycle.prepare === "function" &&
+      typeof promptLifecycle.consume === "function"
+        ? promptLifecycle
+        : {
+            prepare: prepareAcpPrompt,
+            consume: consumeCompletedAcpPrompt,
+          };
     this.proc = null;
     this.rl = null;
     this.nextId = 1;
@@ -247,6 +278,12 @@ export class GrokAcpClient extends EventEmitter {
     this.currentModelId = null;
     /** Human-readable name for the current model when the agent provides one. */
     this.currentModelName = null;
+    /** Last known ACP session mode (`plan`, `default`, ...). */
+    this.currentModeId = null;
+    /** Serialize mode changes so an older response cannot win the same session. */
+    this._modeSyncTail = Promise.resolve();
+    this._modeSyncVersion = 0;
+    this._modeSyncPending = 0;
     /**
      * Models advertised on session/new|load (`models.availableModels`).
      * @type {{ modelId: string, name: string }[]}
@@ -263,6 +300,10 @@ export class GrokAcpClient extends EventEmitter {
     this.turnOpen = false;
     /** Stop was hit for the in-flight prompt — do not drain cron after it. */
     this._turnCancelled = false;
+    /** Assistant text for the open turn (working-knowledge consume). */
+    this._turnAssistantBuf = "";
+    this._turnInboxId = null;
+    this._turnObjectId = "";
     this.terminals = new AcpTerminalManager({
       defaultCwd: this.cwd,
       allowOutsideProject: this.allowOutsideProject,
@@ -451,7 +492,7 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   _previewMcpPayload() {
-    const servers = desktopPreviewMcpServers();
+    const servers = desktopPreviewMcpServers(this.windowId);
     debugLog("preview", "session-mcp", {
       count: servers.length,
       names: servers.map((s) => s.name),
@@ -507,6 +548,10 @@ export class GrokAcpClient extends EventEmitter {
     };
   }
 
+  _rememberSessionMode(session) {
+    this.currentModeId = rememberSessionMode(session);
+  }
+
   /**
    * Align live session effort with Desktop preference after session/new|load.
    * Spawn flag usually already matches; this covers load + mid-process /new.
@@ -549,6 +594,7 @@ export class GrokAcpClient extends EventEmitter {
     this.allowWritesThisSession = false;
     this.emit("writes-session", false);
     this._rememberModels(session);
+    this._rememberSessionMode(session);
     this.terminals.setDefaultCwd(this.cwd);
     this.ready = true;
     await this._syncReasoningEffortToSession();
@@ -557,6 +603,7 @@ export class GrokAcpClient extends EventEmitter {
       cwd: this.cwd,
       grokBinary: this.grokPath,
       resumed: false,
+      sessionMode: this.currentModeId,
       ...this._modelsPublic(),
     });
     return this.sessionId;
@@ -594,6 +641,7 @@ export class GrokAcpClient extends EventEmitter {
     this.allowWritesThisSession = false;
     this.emit("writes-session", false);
     this._rememberModels(result);
+    this._rememberSessionMode(result);
     this.terminals.setDefaultCwd(this.cwd);
     this.ready = true;
     await this._syncReasoningEffortToSession();
@@ -602,6 +650,7 @@ export class GrokAcpClient extends EventEmitter {
       cwd: this.cwd,
       grokBinary: this.grokPath,
       resumed: true,
+      sessionMode: this.currentModeId,
       ...this._modelsPublic(),
     });
     return this.sessionId;
@@ -639,6 +688,17 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   _onLine(line) {
+    try {
+      this._dispatchLine(line);
+    } catch (err) {
+      debugLog("acp", "on-line-error", {
+        error: err?.message || String(err),
+      });
+      writeCrashLog("acp", "on-line-error", errorFields(err));
+    }
+  }
+
+  _dispatchLine(line) {
     const trimmed = line.trim();
     if (!trimmed) return;
     let msg;
@@ -650,6 +710,15 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     const c = classifyInboundMessage(msg);
+    const interjection = unwrapSessionInterjection(msg.method, msg.params);
+    if (interjection) {
+      this.emit("session-interjection", interjection);
+      if (msg.id !== undefined) {
+        this._ensureOnce().beginRequest(msg.id);
+        this._respond(msg.id, {});
+      }
+      return;
+    }
     const mcpEvent = unwrapMcpExtNotification(msg.method, msg.params);
     if (mcpEvent && isMcpElicitCompleteMethod(mcpEvent.method)) {
       if (msg.id !== undefined) {
@@ -670,6 +739,16 @@ export class GrokAcpClient extends EventEmitter {
 
     if (c.kind === "session-update") {
       // Progress only — does not complete tools; agent still needs client RPCs.
+      if (this.turnOpen) {
+        const update = c.params?.update || c.params;
+        const kind = update?.sessionUpdate || update?.session_update;
+        if (kind === "agent_message_chunk") {
+          const piece = extractChunkText(update?.content);
+          if (piece) this._turnAssistantBuf += piece;
+        }
+      }
+      const modeId = currentModeIdFromUpdate(c.params);
+      if (modeId !== undefined) this.currentModeId = modeId;
       this.emit("session-update", this._stampOutboundUpdate(c.params));
       if (c.expectsEmptyAck) {
         this._ensureOnce().beginRequest(c.id);
@@ -1564,9 +1643,78 @@ export class GrokAcpClient extends EventEmitter {
     );
   }
 
-  async prompt(text, { images = [], imageQuality = "compact" } = {}) {
+  /**
+   * Inject a follow-up into the running turn without cancelling it.
+   * Agent drains at the next tool/model safe gap (Codex-style steer).
+   * @param {string} text
+   * @param {{
+   *   images?: { data: string, mimeType?: string }[],
+   *   imageQuality?: "compact" | "high",
+   *   interjectionId?: string,
+   * }} [opts]
+   */
+  async interject(text, { images = [], imageQuality = "compact", interjectionId } = {}) {
     if (!this.sessionId) throw new Error("No ACP session");
-    const prompt = [{ type: "text", text }];
+    const trimmed = String(text || "").trim();
+    const list = Array.isArray(images) ? images : [];
+    if (!trimmed && list.length === 0) {
+      throw new Error("empty interjection");
+    }
+    const compressed = [];
+    for (const img of list) {
+      const next = compressPromptImage(img, imageQuality);
+      if (next?.data) compressed.push(next);
+    }
+    const id =
+      String(interjectionId || "").trim() || crypto.randomUUID();
+    const attempts = interjectAttempts({
+      sessionId: this.sessionId,
+      text: trimmed,
+      interjectionId: id,
+      images: compressed,
+    });
+    const misses = [];
+    for (const attempt of attempts) {
+      try {
+        const raw = await this.request(attempt.method, attempt.params, {
+          timeoutMs: 15_000,
+        });
+        debugLog("acp", "interject-ok", { path: attempt.method, id });
+        const result = unwrapExtMethodResult(raw);
+        const status =
+          result &&
+          typeof result === "object" &&
+          typeof result.status === "string"
+            ? result.status
+            : "queued";
+        return interjectAcceptedResult(id, status);
+      } catch (err) {
+        const message = err?.message || String(err);
+        debugLog("acp", "interject-try", {
+          path: attempt.method,
+          error: message,
+          code: err?.code,
+        });
+        if (isInterjectMethodMissing(err)) {
+          misses.push(err);
+          continue;
+        }
+        throw err instanceof Error ? err : new Error(message);
+      }
+    }
+    debugLog("acp", "interject-unsupported", { attempts: misses.length });
+    return interjectFromAttemptErrors(misses, id);
+  }
+
+  async prompt(text, { images = [], imageQuality = "compact", origin = "user" } = {}) {
+    if (!this.sessionId) throw new Error("No ACP session");
+    const prepared = this._promptLifecycle.prepare({
+      text,
+      sessionId: this.sessionId,
+      cwd: this.cwd,
+      origin,
+    });
+    const { wrapped, prompt } = prepared;
     for (const img of images) {
       const compressed = compressPromptImage(img, imageQuality);
       prompt.push({
@@ -1578,8 +1726,11 @@ export class GrokAcpClient extends EventEmitter {
     // Long agent turns — generous timeout
     this.turnOpen = true;
     this._turnCancelled = false;
+    this._turnAssistantBuf = "";
+    this._turnInboxId = wrapped.inboxId;
+    this._turnObjectId = wrapped.objectId || "";
     try {
-      return await this.request(
+      const result = await this.request(
         "session/prompt",
         {
           sessionId: this.sessionId,
@@ -1587,14 +1738,32 @@ export class GrokAcpClient extends EventEmitter {
         },
         { timeoutMs: 30 * 60_000 },
       );
+      try {
+        this._promptLifecycle.consume({
+          assistantText: this._turnAssistantBuf,
+          sessionId: this.sessionId,
+          cwd: this.cwd,
+          inboxId: this._turnInboxId,
+          objectId: this._turnObjectId,
+          cancelled: this._turnCancelled,
+        });
+      } catch (err) {
+        debugLog("acp", "working-knowledge-consume-failed", {
+          error: err?.message || String(err),
+        });
+      }
+      return result;
     } finally {
       this.turnOpen = false;
       const cancelled = this._turnCancelled;
       this._turnCancelled = false;
+      this._turnAssistantBuf = "";
+      this._turnInboxId = null;
+      this._turnObjectId = "";
       if (!cancelled) {
         const next = this._cronQueue.shift();
         if (next) {
-          void this.prompt(next).catch((err) => {
+          void this.prompt(next, { origin: "scheduled" }).catch((err) => {
             debugLog("acp", "scheduled-inject-failed", {
               error: err?.message || String(err),
             });
@@ -1615,7 +1784,7 @@ export class GrokAcpClient extends EventEmitter {
       this._cronQueue.push(text);
       return;
     }
-    void this.prompt(text).catch((err) => {
+    void this.prompt(text, { origin: "scheduled" }).catch((err) => {
       debugLog("acp", "scheduled-inject-failed", {
         error: err?.message || String(err),
       });
@@ -1658,6 +1827,88 @@ export class GrokAcpClient extends EventEmitter {
     this.allowWritesThisSession = Boolean(value);
     this.emit("writes-session", this.allowWritesThisSession);
     return this.allowWritesThisSession;
+  }
+
+  /** Switch the live ACP session mode (`plan`, `default`, ...). */
+  async setSessionMode(modeId) {
+    const nextId = String(modeId || "").trim();
+    if (!nextId) {
+      return {
+        currentModeId: this.currentModeId || null,
+        agentSynced: false,
+        error: "modeId required",
+      };
+    }
+    const sessionAtStart = this.sessionId;
+    if (!sessionAtStart || !this.ready || !this.proc) {
+      return {
+        currentModeId: this.currentModeId || null,
+        agentSynced: false,
+        error: "Agent is not ready",
+      };
+    }
+    const version = ++this._modeSyncVersion;
+    // If another mode RPC is pending, even a request for the current local
+    // value must reach ACP: that earlier RPC may already have changed it.
+    const forceSync = this._modeSyncPending > 0;
+    this._modeSyncPending += 1;
+    const run = async () => {
+      try {
+        if (this.sessionId !== sessionAtStart) {
+          return {
+            currentModeId: this.currentModeId || null,
+            agentSynced: false,
+            error: "Session changed",
+          };
+        }
+        // A later request arrived before this one reached ACP. It owns intent.
+        if (version !== this._modeSyncVersion) {
+          return {
+            currentModeId: this.currentModeId || null,
+            agentSynced: false,
+            error: "Mode request superseded",
+          };
+        }
+        if (!forceSync && nextId === this.currentModeId) {
+          return { currentModeId: nextId, agentSynced: true };
+        }
+        await this.request(
+          "session/set_mode",
+          setSessionModeParams(sessionAtStart, nextId),
+          { timeoutMs: 15_000 },
+        );
+        if (this.sessionId !== sessionAtStart) {
+          return {
+            currentModeId: this.currentModeId || null,
+            agentSynced: false,
+            error: "Session changed",
+          };
+        }
+        if (version !== this._modeSyncVersion) {
+          return {
+            currentModeId: this.currentModeId || null,
+            agentSynced: false,
+            error: "Mode request superseded",
+          };
+        }
+        this.currentModeId = nextId;
+        return { currentModeId: nextId, agentSynced: true };
+      } catch (err) {
+        const raw = err?.message || String(err);
+        const error = /-32601|method not found/i.test(raw)
+          ? "This Grok CLI does not support plan mode (session/set_mode)."
+          : raw;
+        return {
+          currentModeId: this.currentModeId || null,
+          agentSynced: false,
+          error,
+        };
+      } finally {
+        this._modeSyncPending = Math.max(0, this._modeSyncPending - 1);
+      }
+    };
+    this._modeSyncTail = this._modeSyncTail.catch(() => {}).then(run);
+    return this._modeSyncTail;
   }
 
   /**

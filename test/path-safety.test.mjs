@@ -207,6 +207,19 @@ test("linked git worktrees are allowed via porcelain without extra roots", async
   setExtraAllowedRootsFor(() => []);
   const p = assertPathInProject(repo, path.join(sibling, "feat.txt"));
   assert.equal(p, path.join(sibling, "feat.txt"));
+  const canonicalFile = fs.realpathSync(path.join(sibling, "feat.txt"));
+  assert.equal(assertPathInProject(repo, canonicalFile), canonicalFile);
+  // Aliases must not make unrelated siblings or escaping links readable.
+  const outside = path.join(tmp, "outside.txt");
+  fs.writeFileSync(outside, "outside fixture");
+  assert.throws(() => assertPathInProject(repo, outside), /outside/);
+  if (process.platform !== "win32") {
+    fs.symlinkSync(outside, path.join(sibling, "escape.txt"));
+    assert.throws(
+      () => assertPathInProject(repo, path.join(sibling, "escape.txt")),
+      /outside/,
+    );
+  }
 });
 
 test("grokHomeRoots includes resolved GROK_HOME", () => {

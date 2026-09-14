@@ -27,6 +27,7 @@ export function previewApiRecognizes(method, path) {
       p === "/click" ||
       p === "/fill" ||
       p === "/press" ||
+      p === "/hover" ||
       p === "/viewport")
   ) {
     return true;
@@ -48,6 +49,8 @@ let token = "";
 let port = 0;
 /** @type {() => import('electron').BrowserWindow | null} */
 let getOwner = () => null;
+/** @type {(id: number) => import('electron').BrowserWindow | null} */
+let windowById = () => null;
 
 export function previewApiAddress() {
   if (!server || !port || !token) return null;
@@ -58,11 +61,18 @@ export function previewApiAddress() {
   };
 }
 
+/** Resolve only open/navigate fallback ownership; stamped agents never steal focus. */
+export function previewRequestOwner({ owner = null, ownerStamped = false } = {}, fallback = getOwner) {
+  return owner || (ownerStamped ? null : fallback());
+}
+
 /**
  * @param {object} req
  * @param {string} req.method
  * @param {string} req.path
  * @param {Record<string, unknown>} [req.body]
+ * @param {import('electron').BrowserWindow | null} [req.owner]
+ * @param {boolean} [req.ownerStamped]
  */
 export async function dispatchPreviewApi(req) {
   const method = String(req.method || "GET").toUpperCase();
@@ -76,6 +86,7 @@ export async function dispatchPreviewApi(req) {
   }
 
   const {
+    claimPreviewOwner,
     closePreviewWindow,
     navigatePreview,
     openPreviewWindow,
@@ -87,6 +98,11 @@ export async function dispatchPreviewApi(req) {
     VIEWPORTS,
   } = await previewWindowApi();
 
+  // A stamped request is bound to its agent window. Never substitute focus for
+  // a stale/invalid stamped id; only old un-stamped open/navigate may do that.
+  if (req.owner) claimPreviewOwner(req.owner);
+  const openOwner = previewRequestOwner(req, getOwner);
+
   if (method === "GET" && path === "/health") {
     return { ok: true, ...previewPublicState() };
   }
@@ -95,7 +111,7 @@ export async function dispatchPreviewApi(req) {
   }
   if (method === "POST" && path === "/open") {
     const url = typeof body.url === "string" ? body.url : "";
-    return openPreviewWindow({ owner: getOwner(), url });
+    return openPreviewWindow({ owner: openOwner, url });
   }
   if (method === "POST" && path === "/close") {
     return { ok: closePreviewWindow(), ...previewPublicState() };
@@ -103,7 +119,7 @@ export async function dispatchPreviewApi(req) {
   if (method === "POST" && path === "/navigate") {
     const url = typeof body.url === "string" ? body.url : "";
     if (!previewPublicState().open) {
-      return openPreviewWindow({ owner: getOwner(), url });
+      return openPreviewWindow({ owner: openOwner, url });
     }
     return navigatePreview(url);
   }
@@ -122,6 +138,8 @@ export async function dispatchPreviewApi(req) {
       ref: body.ref || body.uid,
       selector: body.selector,
       name: body.name || body.text,
+      x: body.x,
+      y: body.y,
     });
   }
   if (method === "POST" && path === "/fill") {
@@ -146,6 +164,19 @@ export async function dispatchPreviewApi(req) {
       selector: body.selector,
       name: body.name || body.text,
       key: body.key || "Enter",
+    });
+  }
+  if (method === "POST" && path === "/hover") {
+    if (!previewPublicState().open) {
+      throw new Error("Preview is not open. Call preview_open first.");
+    }
+    return runPreviewAction({
+      action: "hover",
+      ref: body.ref || body.uid,
+      selector: body.selector,
+      name: body.name || body.text,
+      x: body.x,
+      y: body.y,
     });
   }
   if (method === "POST" && path === "/viewport") {
@@ -207,7 +238,12 @@ async function handleMcpHttp(req, res, rawBody) {
     res.end(JSON.stringify({ error: "invalid JSON" }));
     return;
   }
-  const reply = await handlePreviewMcpMessage(msg);
+  const { previewOwnerHeaderStamped, previewOwnerIdFromHeaders } =
+    await import("./preview-mcp-tools.mjs");
+  const ownerStamped = previewOwnerHeaderStamped(req.headers);
+  const ownerId = previewOwnerIdFromHeaders(req.headers);
+  const owner = ownerId == null ? null : windowById(ownerId);
+  const reply = await handlePreviewMcpMessage(msg, { owner, ownerStamped });
   if (!reply) {
     res.writeHead(202);
     res.end();
@@ -221,11 +257,12 @@ async function handleMcpHttp(req, res, rawBody) {
 }
 
 /**
- * @param {{ getOwner?: () => import('electron').BrowserWindow | null }} [opts]
+ * @param {{ getOwner?: () => import('electron').BrowserWindow | null, windowById?: (id: number) => import('electron').BrowserWindow | null }} [opts]
  * @returns {Promise<{ url: string, token: string, port: number } | null>}
  */
 export function startPreviewApi(opts = {}) {
   if (opts.getOwner) getOwner = opts.getOwner;
+  if (opts.windowById) windowById = opts.windowById;
   if (server && port) return Promise.resolve(previewApiAddress());
 
   token = token || crypto.randomBytes(24).toString("hex");

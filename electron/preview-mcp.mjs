@@ -1,8 +1,4 @@
-/**
- * Desktop Preview MCP descriptor for session/new|load.
- * Grok merges client mcpServers with ~/.grok — empty array means
- * "no extra client servers", not "wipe user MCP".
- */
+/** ACP descriptor for the one loopback Preview MCP server. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,37 +9,21 @@ import { previewMcpHttpServers } from "./preview-mcp-tools.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_MARKER = "managed-by: grok-desktop-preview";
 
-/**
- * ACP MCP entries. Empty when the loopback API is not up yet.
- * HTTP only (in-process). A second stdio server used to duplicate every tool.
- * @returns {object[]}
- */
-export function desktopPreviewMcpServers() {
-  return previewMcpHttpServers(previewApiAddress());
+export function desktopPreviewMcpServers(windowId) {
+  return previewMcpHttpServers(previewApiAddress(), windowId);
 }
 
-/**
- * Teach the agent about Preview on every project (user skill).
- * Updates only files we manage; never overwrites a hand-edited copy.
- */
+/** Keep only the Desktop-managed copy current; never overwrite a user copy. */
 export function installDesktopPreviewSkill() {
   const src = path.join(__dirname, "preview", "SKILL.md");
-  if (!fs.existsSync(src)) return;
-  const destDir = path.join(grokHomeDir(), "skills", "desktop-preview");
-  const dest = path.join(destDir, "SKILL.md");
-  const body = fs.readFileSync(src, "utf8");
-  const stamped = body.includes(SKILL_MARKER)
-    ? body
-    : `${body.trimEnd()}\n\n<!-- ${SKILL_MARKER} -->\n`;
+  const dest = path.join(grokHomeDir(), "skills", "desktop-preview", "SKILL.md");
   try {
-    if (fs.existsSync(dest)) {
-      const existing = fs.readFileSync(dest, "utf8");
-      if (!existing.includes(SKILL_MARKER)) return;
-      if (existing === stamped) return;
-    }
-    fs.mkdirSync(destDir, { recursive: true });
-    fs.writeFileSync(dest, stamped);
+    const body = fs.readFileSync(src, "utf8");
+    const stamped = body.includes(SKILL_MARKER) ? body : `${body.trimEnd()}\n\n<!-- ${SKILL_MARKER} -->\n`;
+    if (fs.existsSync(dest) && !fs.readFileSync(dest, "utf8").includes(SKILL_MARKER)) return;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    if (!fs.existsSync(dest) || fs.readFileSync(dest, "utf8") !== stamped) fs.writeFileSync(dest, stamped);
   } catch {
-    /* ~/.grok may be locked */
+    /* ~/.grok may be unavailable */
   }
 }

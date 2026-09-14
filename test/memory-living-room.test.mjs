@@ -44,6 +44,16 @@ test("memory toml toggle inserts and rewrites only [memory] enabled", () => {
   assert.match(withOther, /session.save_on_end = true/);
 });
 
+test("memory toggle handles blank lines and commented headers without crossing tables", () => {
+  const source = '# keep\r\n\r\n[memory] # local memory\r\n\r\n[ui]\r\nenabled = false\r\n';
+  const enabled = setMemoryEnabledInToml(source, true);
+  assert.equal(memoryEnabledFromToml(enabled), true);
+  assert.ok(enabled.endsWith('[ui]\r\nenabled = false\r\n'));
+  assert.equal(memoryEnabledFromToml(setMemoryEnabledInToml(enabled, false)), false);
+  assert.equal(memoryEnabledFromToml('[memory]\n\n[ui]\nenabled = true\n'), false);
+  assert.equal(setMemoryEnabledInToml('[memory]', true), '[memory]\nenabled = true\n');
+});
+
 test("memory markdown parse and remove keeps other headings", () => {
   const md = `## Preferences\n\nAlways use Chinese.\n\n## Project Context\n\nRepo is Magician.\n`;
   const entries = parseMemoryMarkdown(md, { file: "MEMORY.md", scope: "global" });

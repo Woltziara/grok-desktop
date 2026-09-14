@@ -51,7 +51,7 @@ export function timelineToMarkdown(items, meta = {}) {
  */
 export function exportFilename(title) {
   const stem = String(title || "对话")
-    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/[\\/:*?"<>|]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 60);

@@ -61,6 +61,10 @@ Runtime and build dependencies are listed in `package.json` /
 similar). They are not copied into this notice one-by-one; install the
 lockfile to obtain them.
 
+Preview guest aiming uses **playwright-core** (Microsoft, Apache-2.0) against
+this app’s existing Chromium view over a localhost DevTools port. It does not
+launch a second browser.
+
 ## Behavior we looked at — no source copied
 
 | Source | License | Rule |

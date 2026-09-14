@@ -40,6 +40,85 @@ export function webRequestCdpType(resourceType) {
   }
 }
 
+const PLAYWRIGHT_CDP_TYPE = {
+  document: "Document",
+  stylesheet: "Stylesheet",
+  image: "Image",
+  media: "Media",
+  font: "Font",
+  script: "Script",
+  xhr: "XHR",
+  fetch: "Fetch",
+  eventsource: "EventSource",
+  websocket: "WebSocket",
+  texttrack: "Other",
+  manifest: "Other",
+  other: "Other",
+};
+
+/**
+ * Fold a Playwright request/response into the CDP log.
+ * @param {PreviewNetworkLog} log
+ * @param {'request' | 'response' | 'finished' | 'failed'} phase
+ * @param {Record<string, unknown>} info
+ */
+export function ingestPlaywrightEvent(log, phase, info) {
+  const d = info && typeof info === "object" ? info : {};
+  const requestId = String(d.id || "");
+  if (!requestId) return;
+  const ts = Number(d.ts);
+  const type =
+    PLAYWRIGHT_CDP_TYPE[String(d.resourceType || "").toLowerCase()] || "Other";
+  if (phase === "request") {
+    log.handleCdp("Network.requestWillBeSent", {
+      requestId,
+      timestamp: ts,
+      type,
+      frameId: String(d.frameId || ""),
+      initiator: {
+        type: String(d.initiator || "other"),
+        url: String(d.initiatorUrl || ""),
+      },
+      request: {
+        url: String(d.url || ""),
+        method: String(d.method || "GET"),
+        headers: d.headers && typeof d.headers === "object" ? d.headers : {},
+      },
+    });
+    return;
+  }
+  if (phase === "response") {
+    log.handleCdp("Network.responseReceived", {
+      requestId,
+      timestamp: ts,
+      type,
+      response: {
+        status: Number(d.status) || 0,
+        statusText: String(d.statusText || ""),
+        mimeType: String(d.mime || ""),
+        fromDiskCache: Boolean(d.fromCache),
+        headers: d.headers && typeof d.headers === "object" ? d.headers : {},
+      },
+    });
+    return;
+  }
+  if (phase === "finished") {
+    log.handleCdp("Network.loadingFinished", {
+      requestId,
+      timestamp: ts,
+      encodedDataLength: Number(d.encoded) || 0,
+    });
+    return;
+  }
+  log.handleCdp("Network.loadingFailed", {
+    requestId,
+    timestamp: ts,
+    errorText: String(d.error || "failed"),
+    canceled: Boolean(d.canceled),
+    type,
+  });
+}
+
 /**
  * Fold an Electron webRequest event into the CDP log (debugger fallback).
  * @param {PreviewNetworkLog} log

@@ -25,3 +25,10 @@ export function editQueuedItem(list, id, text) {
 export function dropQueuedItem(list, id) {
   return (Array.isArray(list) ? list : []).filter((row) => row?.id !== id);
 }
+
+/** Restore a failed in-flight FIFO item to the head exactly once. */
+export function restoreQueuedItem(list, item) {
+  const rows = Array.isArray(list) ? list : [];
+  if (!item?.id || rows.some((row) => row?.id === item.id)) return rows;
+  return [item, ...rows];
+}
