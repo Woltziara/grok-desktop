@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { createRequire } from "node:module";
+import { finished } from "node:stream/promises";
 import { verifyPackage } from "../scripts/verify-package.mjs";
 
 const require = createRequire(import.meta.url);
@@ -25,7 +26,9 @@ async function fixture({ missing = null, badHash = false, asarDeps } = {}) {
   const dependencies = asarDeps || { react: "1", "playwright-core": "1" };
   fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ name: "fixture", dependencies }));
   fs.writeFileSync(path.join(source, "node_modules", "react", "package.json"), JSON.stringify({ name: "react" }));
-  await asar.createPackage(source, path.join(resources, "app.asar"));
+  const archiveWrite = await asar.createPackage(source, path.join(resources, "app.asar"));
+  // ASAR 3 returns the ended stream before its final writes have finished.
+  await finished(archiveWrite);
   const unpacked = path.join(resources, "app.asar.unpacked", "node_modules", "playwright-core");
   if (missing !== "playwright") {
     fs.mkdirSync(unpacked, { recursive: true });
