@@ -1,0 +1,57 @@
+name: Verify desktop source
+on:
+  push:
+    branches: [pro/complete-desktop-20260914]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: desktop-verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive exact source (no Git credentials or user data)
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-commit.txt
+          git archive --format=tar HEAD | gzip -n > evidence/source.tar.gz
+          sha256sum evidence/source.tar.gz > evidence/source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-source-${{ github.sha }}
+          path: evidence/source*
+          retention-days: 7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck, tests and renderer build
+        run: |
+          set -o pipefail
+          npm run check 2>&1 | tee evidence/check.log
+          npm run build 2>&1 | tee evidence/build.log
+      - name: Verify Linux packaging, never publish
+        run: npx electron-builder --linux --dir --publish never
+      - name: Export dependency archive for offline reproducible verification
+        if: always()
+        run: |
+          if [ -d node_modules ]; then
+            tar -czf evidence/dependencies-linux.tar.gz node_modules
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-verification-${{ github.sha }}
+          path: |
+            evidence/*.log
+            evidence/dependencies-linux.tar.gz
+          retention-days: 7
