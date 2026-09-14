@@ -209,7 +209,7 @@ test("capture delivery is in usePromptDelivery, not App", () => {
   assert.doesNotMatch(app, /pendingImageFromBase64/);
   assert.match(hook, /preview:viewport-capture/);
   assert.match(hook, /previewCaptureToSubmit/);
-  assert.match(hook, /submitFromComposer\(parsed\.submit\)/);
+  assert.match(hook, /submitFromComposer\(\{ \.\.\.parsed\.submit, sessionId: payload\.sessionId \}\)/);
   assert.match(capture, /mode: "auto"/);
   assert.match(capture, /imageQuality: "compact"/);
   assert.match(preload, /"preview:viewport-capture"/);

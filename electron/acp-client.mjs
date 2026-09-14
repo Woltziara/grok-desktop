@@ -1888,6 +1888,7 @@ export class GrokAcpClient extends EventEmitter {
         this._turnAssistantBuf = "";
         this._turnInboxId = null;
         this._turnObjectId = "";
+        this.emit("turn-settled", { sessionId: turn.sessionId, turnId: turn.id, ok: completed, cancelled: Boolean(turn.cancelled) });
         if (completed && !turn.cancelled) {
           const next = this._cronQueue.shift();
           if (next) void this.prompt(next, { origin: "scheduled" }).catch((err) => {

@@ -36,6 +36,8 @@ export type DraftFile = {
 
 export type SessionDraft = {
   text: string;
+  textToken?: string;
+  submission?: {id: string; fingerprint: string};
   cursor: number;
   highDetail?: boolean;
   files: DraftFile[];

@@ -579,34 +579,16 @@ declare global {
         sessionId?: string;
         mode?: "new" | "resume";
       }) => Promise<OpenProjectResult>;
-      prompt: (
-        text: string,
-        opts?: {
-          sessionId?: string;
-          origin?: "user" | "followup";
-          images?: PromptImage[];
-          imageQuality?: "compact" | "high";
-        },
-      ) => Promise<unknown>;
-      interject: (
-        text: string,
-        opts?: {
-          images?: PromptImage[];
-          imageQuality?: "compact" | "high";
-          interjectionId?: string;
-          sessionId?: string;
-        },
-      ) => Promise<
-        | { ok: true; status?: string; interjectionId: string }
-        | { ok: false; reason: "unsupported" | "turn-ended"; interjectionId: string }
-      >;
+      submitDelivery: (input: {id: string; sessionId: string; cwd: string; text: string; images: PromptImage[]; mode?: string; imageQuality?: "compact" | "high"; origin?: "user" | "followup"; timelineText?: string; purpose?: "compact"}) => Promise<{accepted: boolean; duplicate?: boolean; id: string; status: string; state: DeliveryState}>;
+      listOutbox: (sessionId: string) => Promise<DeliveryState>;
+      mutateOutbox: (sessionId: string, action: string, data?: Record<string, unknown>) => Promise<DeliveryState>;
       setSessionMode: (modeId: string) => Promise<{
         agentSynced: boolean;
         currentModeId: string | null;
         error?: string;
       }>;
       cancel: (sessionId?: string) => Promise<boolean>;
-      compact: (hint?: string) => Promise<unknown>;
+      compact: (hint?: string, sessionId?: string) => Promise<unknown>;
       rewind: (
         targetPromptIndex: number,
         restoreFiles?: boolean,
@@ -833,7 +815,7 @@ declare global {
         path: string,
         opts?: { staged?: boolean },
       ) => Promise<{ path: string; staged: boolean; diff: string | null }>;
-      readFile: (path: string) => Promise<FileReadResult>;
+      readFile: (path: string, sessionId?: string) => Promise<FileReadResult>;
       writeFile: (
         path: string,
         content: string,
@@ -854,7 +836,7 @@ declare global {
       pickFiles?: () => Promise<string[]>;
       pickFolder?: () => Promise<string | null>;
       pathForFile?: (file: File) => string;
-      importAttachment?: (path: string) => Promise<{
+      importAttachment?: (path: string, sessionId?: string) => Promise<{
         kind: string;
         name: string;
         path: string;
@@ -965,3 +947,12 @@ declare global {
 }
 
 export {};
+
+export type DeliveryRow = {
+  id: string; text?: string; images?: (PromptImage & {id?: string; name?: string})[];
+  imageQuality?: "compact" | "high"; timelineText?: string; origin?: "user" | "followup";
+  status: "queued" | "sending" | "interjecting" | "interjected" | "failed" | "uncertain" | "cancelled" | "done" | "dismissed";
+  at: number; startedAt?: number; attempt: number; attemptId?: string; error?: string;
+};
+export type DeliveryState = {sessionId: string; cwd: string; revision: number; paused: boolean; busy: boolean; items: DeliveryRow[]};
+export type DeliveryEvent = {type: string; sessionId: string; cwd?: string; state?: DeliveryState; row?: DeliveryRow; method?: "prompt" | "interject"; ok?: boolean; cancelled?: boolean; error?: string};

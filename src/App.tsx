@@ -376,6 +376,8 @@ export default function App() {
     promptQueueRef,
     sendNowRef,
     afterTurnRef,
+    outboxPaused,
+    resumeQueue,
     clearPromptQueue,
     removeQueued,
     submitFromComposer,
@@ -1122,10 +1124,12 @@ export default function App() {
         return false;
       }
       const note = typeof hint === "string" ? hint.trim() : "";
+      const compactSessionId = sessionIdRef.current;
+      if (!compactSessionId) return false;
       compactingRef.current = true;
       setCompacting(true);
       try {
-        const result = (await window.grokDesktop.compact(note)) as {
+        const result = (await window.grokDesktop.compact(note, compactSessionId)) as {
           ok?: boolean;
           message?: string;
           tokens_before?: number;
@@ -1133,6 +1137,7 @@ export default function App() {
           tokens_after?: number;
           tokensAfter?: number;
         } | null;
+        if (sessionIdRef.current !== compactSessionId || openingRef.current) return false;
         if (result && result.ok === false) {
           throw new Error(result.message || "Compress failed");
         }
@@ -1271,30 +1276,13 @@ export default function App() {
       appendSystem("余量格子在空闲时才能点。");
       return;
     }
-    if (compactingRef.current || afterTurnRef.current) return;
-    afterTurnRef.current = async (result) => {
-      if (!shouldCompactAfterPrep(result)) {
-        appendSystem("胶囊没写成，所以没有压缩。");
-        return;
-      }
-      const compacted = await runCompressRef.current(COMPACT_PRESERVE_HINT, {
-        fromPrep: true,
-      });
-      if (!shouldSendCatchUpAfterCompact(compacted)) return;
-      if (
-        !shouldSendCatchUpAfterUserInsert({
-          sendNow: sendNowRef.current,
-          queued: promptQueueRef.current,
-        })
-      ) {
-        return;
-      }
-      queueNextPrompt(COMPACT_CATCH_UP_PROMPT);
-    };
+    if (compactingRef.current) return;
     const accepted = await submitFromComposer({
       text: COMPACT_PREP_PROMPT,
       images: [],
       mode: "auto",
+      origin: "followup",
+      purpose: "compact",
     });
     if (!accepted) {
       afterTurnRef.current = null;
@@ -2218,6 +2206,8 @@ export default function App() {
             projectOpen={Boolean(project)}
             commands={allCommands}
             promptQueue={promptQueue}
+            outboxPaused={outboxPaused}
+            onResumeQueue={resumeQueue}
             onSubmit={submitFromComposer}
             onStop={stopTurn}
             onLocalCommand={handleLocalCommand}

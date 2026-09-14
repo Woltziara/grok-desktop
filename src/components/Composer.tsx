@@ -1,3 +1,4 @@
+import { appendDraftFiles, subtractSubmittedDraft, draftFingerprint } from "../../shared/draft-snapshot.mjs";
 import {
   memo,
   useCallback,
@@ -63,6 +64,7 @@ import type { ReasoningEffort } from "../lib/reasoning-effort";
 import {
   readDraft,
   saveDraft,
+  getFlowState,
   type DraftFile,
   type SessionDraft,
 } from "../lib/workspace-store";
@@ -71,6 +73,8 @@ import { CommandMenu } from "./CommandMenu";
 import { ContextMeter } from "./ContextMeter";
 
 export type QueuedPrompt = {
+  status?: import("../vite-env").DeliveryRow["status"];
+  error?: string;
   id: string;
   text: string;
   images: PendingImage[];
@@ -82,6 +86,10 @@ export type QueuedPrompt = {
 };
 
 export type ComposerSubmit = {
+  sessionId?: string;
+  cwd?: string;
+  deliveryId?: string;
+  purpose?: "compact";
   text: string;
   images: PendingImage[];
   mode: "auto" | "steer" | "queue" | "now";
@@ -136,6 +144,8 @@ export const Composer = memo(function Composer({
   projectOpen,
   commands,
   promptQueue,
+  outboxPaused = false,
+  onResumeQueue,
   onSubmit,
   onStop,
   onLocalCommand,
@@ -170,6 +180,8 @@ export const Composer = memo(function Composer({
   projectOpen: boolean;
   commands: SlashCommand[];
   promptQueue: QueuedPrompt[];
+  outboxPaused?: boolean;
+  onResumeQueue?: () => void;
   /** Return true when the draft should clear (accepted queue/delivery). */
   onSubmit: (payload: ComposerSubmit) => boolean | Promise<boolean>;
   onStop?: () => void;
@@ -216,13 +228,12 @@ export const Composer = memo(function Composer({
   const hydratedRef = useRef(false);
   const persistFailRef = useRef("");
   const imageDataUrlRef = useRef<Record<string, string>>({});
-  const snapshotRef = useRef<{
-    input: string;
-    images: PendingImage[];
-    files: PendingFile[];
-    highDetail: boolean;
-    cursor: number;
-  } | null>(null);
+  const mountedRef = useRef(true);
+  const textTokenRef = useRef("");
+  const submissionRef = useRef<SessionDraft["submission"]>(undefined);
+  const hydratingFilesRef = useRef<DraftFile[]>([]);
+  const removedAttachmentIds = useRef(new Set<string>());
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   const [cmdIndex, setCmdIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [composerHeight, setComposerHeight] = useState(readStoredComposerHeight);
@@ -336,239 +347,146 @@ export const Composer = memo(function Composer({
     persistComposerHeight(COMPOSER_HEIGHT_DEFAULT);
   }, []);
 
+  const draftLocation = useCallback(() => sessionId ? getFlowState().sessionLocations?.[sessionId]?.cwd || sessionCwd : sessionCwd, [sessionCwd, sessionId]);
+  const imageRecord = useCallback((img: PendingImage): DraftFile => ({
+    id: img.id, name: img.name || "图片", mimeType: img.mimeType, size: img.source?.size || 0,
+    kind: "image", path: (img as PendingImage & {path?: string}).path,
+    blobId: img.id, dataUrl: imageDataUrlRef.current[img.id] || undefined,
+  }), []);
+  const fileRecord = useCallback((file: PendingFile): DraftFile => ({
+    id: file.id, name: file.name, mimeType: file.mimeType, size: file.size, kind: file.kind,
+    path: file.path, status: file.status, text: file.text,
+  }), []);
+  const captureDraft = useCallback((): SessionDraft => ({
+    text: inputRef.current, textToken: textTokenRef.current, submission: submissionRef.current,
+    cursor: textareaRef.current?.selectionStart ?? inputRef.current.length,
+    highDetail: highDetailRef.current, quotes: quotesRef.current, savedAt: Date.now(), cwd: draftLocation() || "",
+    files: [...new Map([
+      ...hydratingFilesRef.current.filter(f => !removedAttachmentIds.current.has(f.id)),
+      ...imagesRef.current.map(imageRecord), ...filesRef.current.map(fileRecord),
+    ].map(file => [file.id, file])).values()],
+  }), [draftLocation, imageRecord, fileRecord]);
+  const writeDraft = useCallback((draft: SessionDraft | null) => {
+    const cwd = draftLocation();
+    if (!cwd || !sessionId) return false;
+    const result = saveDraft(cwd, sessionId, draft);
+    if (!result.ok && mountedRef.current) onError(`草稿没保存成功：${result.error || "请检查磁盘空间"}`);
+    return result.ok;
+  }, [draftLocation, sessionId, onError]);
   const persistCurrentDraft = useCallback(() => {
-    if (!sessionCwd || !sessionId) return;
-    const hasLive =
-      Boolean(String(inputRef.current || "").trim()) ||
-      imagesRef.current.length > 0 ||
-      filesRef.current.length > 0 ||
-      Boolean(quotesRef.current?.length);
-    if (!hydratedRef.current && !hasLive) return;
-    const files: DraftFile[] = [
-      ...imagesRef.current.map((img) => ({
-        id: img.id,
-        name: img.name || "图片",
-        mimeType: img.mimeType,
-        size: img.source?.size || 0,
-        kind: "image",
-        path: (img as PendingImage & { path?: string }).path,
-        blobId: img.id,
-        dataUrl: imageDataUrlRef.current[img.id] || undefined,
-      })),
-      ...filesRef.current.map((f) => ({
-        id: f.id,
-        name: f.name,
-        mimeType: f.mimeType,
-        size: f.size,
-        kind: f.kind,
-        path: f.path,
-        status: f.status,
-        text: f.text,
-      })),
-    ];
-    const draft: SessionDraft = {
-      text: inputRef.current,
-      cursor: textareaRef.current?.selectionStart ?? inputRef.current.length,
-      highDetail: highDetailRef.current,
-      files,
-      quotes: quotesRef.current,
-      savedAt: Date.now(),
-      cwd: sessionCwd,
-    };
-    const result = saveDraft(sessionCwd, sessionId, draft);
-    if (result && result.ok === false) {
-      const msg = `草稿没保存成功。${result.error || "这台电脑的存储空间可能不够。"}`;
-      if (persistFailRef.current !== msg) {
-        persistFailRef.current = msg;
-        onError(msg);
-      }
-    } else {
-      persistFailRef.current = "";
-    }
-  }, [sessionCwd, sessionId, onError]);
-
+    if (!hydratedRef.current) return;
+    writeDraft(captureDraft());
+  }, [captureDraft, writeDraft]);
   useEffect(() => {
-    const t = window.setTimeout(() => persistCurrentDraft(), 280);
-    return () => {
-      window.clearTimeout(t);
-      persistCurrentDraft();
-    };
+    const timer = window.setTimeout(persistCurrentDraft, 280);
+    return () => { window.clearTimeout(timer); persistCurrentDraft(); };
   }, [input, pendingImages, pendingFiles, quotes, highDetail, persistCurrentDraft]);
-
   useEffect(() => {
-    return () => persistCurrentDraft();
+    window.addEventListener("grok-flush-draft", persistCurrentDraft);
+    return () => { window.removeEventListener("grok-flush-draft", persistCurrentDraft); persistCurrentDraft(); };
   }, [persistCurrentDraft]);
 
-  useEffect(() => {
-    const onFlush = () => persistCurrentDraft();
-    window.addEventListener("grok-flush-draft", onFlush);
-    return () => window.removeEventListener("grok-flush-draft", onFlush);
-  }, [persistCurrentDraft]);
+  const appendPrepared = useCallback((images: PendingImage[], files: PendingFile[]) => {
+    if (!mountedRef.current) {
+      const cwd = draftLocation();
+      if (!cwd || !sessionId) return;
+      const prior = readDraft(cwd, sessionId) || {text:"", files:[], cursor:0, savedAt:Date.now(), cwd};
+      const additions = [...images.map(imageRecord), ...files.map(fileRecord)];
+      const saved = saveDraft(cwd, sessionId, appendDraftFiles(prior, additions));
+      window.dispatchEvent(new CustomEvent("grok-draft-handoff", {detail:{sessionId, files:additions, error:saved.ok ? undefined : saved.error}}));
+      for (const image of images) revokePendingImagePreview(image);
+      return;
+    }
+    const imageMap = new Map(imagesRef.current.map(i => [i.id, i]));
+    for (const image of images) if (!removedAttachmentIds.current.has(image.id) && !imageMap.has(image.id)) imageMap.set(image.id, image);
+    const fileMap = new Map(filesRef.current.map(i => [i.id, i]));
+    for (const file of files) if (!removedAttachmentIds.current.has(file.id)) fileMap.set(file.id, file);
+    imagesRef.current = [...imageMap.values()]; filesRef.current = [...fileMap.values()];
+    setPendingImages(imagesRef.current); setPendingFiles(filesRef.current);
+    persistCurrentDraft();
+  }, [draftLocation, sessionId, imageRecord, fileRecord, persistCurrentDraft]);
+
+  const restoreFiles = useCallback(async (records: DraftFile[]) => {
+    const images: PendingImage[] = [], files: PendingFile[] = [];
+    for (const file of records) {
+      if (removedAttachmentIds.current.has(file.id)) continue;
+      if (file.kind === "image") {
+        let blob: Blob | null = null;
+        try { blob = await getDraftBlob(file.blobId || file.id); } catch { /* data URL fallback */ }
+        if (!mountedRef.current) { for (const image of images) revokePendingImagePreview(image); return; }
+        if (removedAttachmentIds.current.has(file.id)) continue;
+        if (blob) images.push({id:file.id, data:"", mimeType:file.mimeType || blob.type || "image/png", name:file.name, source:blob, previewUrl:URL.createObjectURL(blob)});
+        else {
+          const dataUrl = file.dataUrl || (file.previewUrl?.startsWith("data:") ? file.previewUrl : "");
+          const restored = dataUrl ? dataUrlToPendingImage(dataUrl, {id:file.id, name:file.name, mimeType:file.mimeType}) : null;
+          if (restored) { images.push(restored); imageDataUrlRef.current[file.id] = dataUrl; }
+          else files.push({id:file.id, name:file.name, mimeType:file.mimeType, size:file.size, kind:"other", status:"error", path:file.path, error:"原图内容暂时找不到，请重新附上；没有把它当作已准备好。"});
+        }
+      } else files.push({id:file.id, name:file.name, mimeType:file.mimeType, size:file.size, kind:(file.kind as PendingFile["kind"]) || "other", status:file.status === "ready" ? "ready" : "error", path:file.path, text:file.text});
+    }
+    if (!mountedRef.current) return;
+    hydratingFilesRef.current = hydratingFilesRef.current.filter(file => !records.some(r => r.id === file.id));
+    appendPrepared(images, files);
+  }, [appendPrepared]);
 
   useEffect(() => {
-    if (!sessionCwd || !sessionId) return;
-    let cancelled = false;
-    const draft = readDraft(sessionCwd, sessionId);
+    const cwd = draftLocation();
+    if (!cwd || !sessionId) return;
+    const draft = readDraft(cwd, sessionId);
     hydratedRef.current = true;
     if (!draft) return;
-    setInput(draft.text || "");
-    setHighDetail(Boolean(draft.highDetail));
-    setQuotes(normalizeComposerQuotes(draft.quotes));
-    void (async () => {
-      const images: PendingImage[] = [];
-      const files: PendingFile[] = [];
-      let missingImage = false;
-      for (const f of draft.files || []) {
-        if (f.kind === "image") {
-          let blob: Blob | null = null;
-          try {
-            blob = await getDraftBlob(f.blobId || f.id);
-          } catch {
-            blob = null;
-          }
-          if (cancelled) return;
-          if (blob) {
-            images.push({
-              id: f.id,
-              data: "",
-              mimeType: f.mimeType || blob.type || "image/png",
-              previewUrl: URL.createObjectURL(blob),
-              name: f.name,
-              source: blob,
-            });
-            continue;
-          }
-          const restored = f.dataUrl
-            ? dataUrlToPendingImage(f.dataUrl, {
-                id: f.id,
-                name: f.name,
-                mimeType: f.mimeType,
-              })
-            : null;
-          if (restored) {
-            images.push(restored);
-            imageDataUrlRef.current[restored.id] = f.dataUrl || "";
-          } else if (f.previewUrl?.startsWith("data:")) {
-            images.push({
-              id: f.id,
-              data: "",
-              mimeType: f.mimeType || "image/png",
-              previewUrl: f.previewUrl,
-              name: f.name,
-            });
-          } else {
-            missingImage = true;
-          }
-        } else {
-          files.push({
-            id: f.id,
-            name: f.name,
-            mimeType: f.mimeType,
-            size: f.size,
-            kind: (f.kind as PendingFile["kind"]) || "other",
-            status: f.status === "error" ? "error" : "ready",
-            path: f.path,
-            text: f.text,
-          });
-        }
-      }
-      if (cancelled) return;
-      setPendingImages(images);
-      setPendingFiles(files);
-      if (missingImage) {
-        onError("有附过的图片找不到完整内容了，需要重新附上。");
-      }
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (!el) return;
-        el.focus();
-        const cur = Math.min(draft.cursor || 0, el.value.length);
-        el.setSelectionRange(cur, cur);
-      });
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionCwd, sessionId, onError]);
-
-  useEffect(() => {
-    if (!reviveNonce) return;
-    const snap = snapshotRef.current;
-    if (!snap) return;
-    setInput(snap.input);
-    setPendingImages(snap.images);
-    setPendingFiles(snap.files);
-    setHighDetail(snap.highDetail);
-    void (async () => {
-      for (const img of snap.images || []) {
-        if (img.source) {
-          try {
-            await putDraftBlob(img.id, img.source);
-          } catch {
-            /* quota — persist below still records the draft */
-          }
-        }
-      }
-      if (!sessionCwd || !sessionId) return;
-      const files: DraftFile[] = [
-        ...(snap.images || []).map((img) => ({
-          id: img.id,
-          name: img.name || "图片",
-          mimeType: img.mimeType,
-          size: img.source?.size || 0,
-          kind: "image",
-          blobId: img.id,
-        })),
-        ...(snap.files || []).map((f) => ({
-          id: f.id,
-          name: f.name,
-          mimeType: f.mimeType,
-          size: f.size,
-          kind: f.kind,
-          path: f.path,
-          status: f.status,
-          text: f.text,
-        })),
-      ];
-      saveDraft(sessionCwd, sessionId, {
-        text: snap.input,
-        cursor: snap.cursor,
-        highDetail: snap.highDetail,
-        files,
-        savedAt: Date.now(),
-        cwd: sessionCwd,
-      });
-    })();
-    requestAnimationFrame(() => {
+    textTokenRef.current = draft.textToken || `legacy-${draft.savedAt}`;
+    submissionRef.current = draft.submission;
+    inputRef.current = draft.text || ""; setInput(inputRef.current);
+    highDetailRef.current = Boolean(draft.highDetail); setHighDetail(highDetailRef.current);
+    quotesRef.current = normalizeComposerQuotes(draft.quotes); setQuotes(quotesRef.current);
+    hydratingFilesRef.current = draft.files || [];
+    const token = textTokenRef.current;
+    void restoreFiles(draft.files || []).then(() => {
+      if (!mountedRef.current || textTokenRef.current !== token) return;
       const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      const cur = Math.min(snap.cursor, el.value.length);
-      el.setSelectionRange(cur, cur);
+      if (el && (!document.activeElement || document.activeElement === document.body || document.activeElement === el)) {
+        const cursor = Math.min(draft.cursor || 0, el.value.length); el.setSelectionRange(cursor, cursor);
+      }
     });
-  }, [reviveNonce, sessionCwd, sessionId]);
+    // Composer is keyed by session identity; hydration runs once per mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  useEffect(() => {
-    if (!focusNonce) return;
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [focusNonce]);
-
-  const clearDraft = useCallback(() => {
-    setPendingImages((prev) => {
-      for (const img of prev) revokePendingImagePreview(img);
-      return [];
-    });
-    setPendingFiles((prev) => {
-      for (const file of prev) revokePendingFile(file);
-      return [];
-    });
-    setInput("");
-    setQuotes([]);
-    setHighDetail(false);
-    if (sessionCwd && sessionId) {
-      saveDraft(sessionCwd, sessionId, null);
+  const consumeSubmittedDraft = useCallback((submitted: SessionDraft) => {
+    if (!mountedRef.current) {
+      const cwd = draftLocation();
+      if (!cwd || !sessionId) return;
+      const current = readDraft(cwd, sessionId);
+      if (current) saveDraft(cwd, sessionId, subtractSubmittedDraft(current, submitted));
+      window.dispatchEvent(new CustomEvent("grok-draft-handoff", {detail:{sessionId, submitted}}));
+      return;
     }
-  }, [sessionCwd, sessionId]);
+    const next: SessionDraft = subtractSubmittedDraft(captureDraft(), submitted);
+    const retained = new Set(next.files.map(file => file.id));
+    for (const file of submitted.files) if (!retained.has(file.id)) removedAttachmentIds.current.add(file.id);
+    imagesRef.current = imagesRef.current.filter(image => { if (retained.has(image.id)) return true; revokePendingImagePreview(image); return false; });
+    filesRef.current = filesRef.current.filter(file => retained.has(file.id));
+    hydratingFilesRef.current = hydratingFilesRef.current.filter(file => retained.has(file.id));
+    inputRef.current = next.text; quotesRef.current = next.quotes || []; highDetailRef.current = Boolean(next.highDetail); submissionRef.current = next.submission;
+    setInput(next.text); setPendingImages(imagesRef.current); setPendingFiles(filesRef.current); setQuotes(quotesRef.current); setHighDetail(highDetailRef.current);
+    writeDraft(next);
+  }, [captureDraft, draftLocation, sessionId, writeDraft]);
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent<{sessionId:string; files?:DraftFile[]; submitted?:SessionDraft; error?:string}>).detail;
+      if (detail?.sessionId !== sessionId || !mountedRef.current) return;
+      if (detail.error) onError(`原对话附件保存失败：${detail.error}`);
+      if (detail.files) { hydratingFilesRef.current = [...hydratingFilesRef.current, ...detail.files]; void restoreFiles(detail.files); }
+      if (detail.submitted) consumeSubmittedDraft(detail.submitted);
+    };
+    window.addEventListener("grok-draft-handoff", receive);
+    return () => window.removeEventListener("grok-draft-handoff", receive);
+  }, [sessionId, restoreFiles, consumeSubmittedDraft, onError]);
+  useEffect(() => {
+    if (focusNonce) requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [focusNonce]);
+  const clearDraft = useCallback(() => consumeSubmittedDraft(captureDraft()), [consumeSubmittedDraft, captureDraft]);
 
   const addImages = useCallback(
     async (files: ArrayLike<Blob | File>) => {
@@ -605,11 +523,11 @@ export const Composer = memo(function Composer({
         }
       }
       if (images.length) {
-        setPendingImages((prev) => [...prev, ...images]);
+        appendPrepared(images, []);
       }
       if (error) onError(error);
     },
-    [onError],
+    [onError, appendPrepared],
   );
 
   const importNativePaths = useCallback(
@@ -622,7 +540,7 @@ export const Composer = memo(function Composer({
       }
       for (const p of paths) {
         try {
-          const row = await api(p);
+          const row = await api(p, sessionId || undefined);
           if (row.kind === "image" && row.data) {
             const img = dataUrlToPendingImage(
               `data:${row.mimeType};base64,${row.data}`,
@@ -640,43 +558,30 @@ export const Composer = memo(function Composer({
                 imageDataUrlRef.current[img.id] =
                   `data:${row.mimeType};base64,${row.data}`;
               }
-              setPendingImages((prev) => {
-                const dup = prev.some(
-                  (x) => x.name === img.name && x.source?.size === img.source?.size,
-                );
-                if (dup) {
-                  onError(`已经附过：${img.name}`);
-                  return prev;
-                }
-                return [...prev, img];
-              });
+              appendPrepared([img], []);
             }
             continue;
           }
           const file = importedToPendingFile(row);
-          setPendingFiles((prev) => {
-            const dup = prev.some(
-              (x) => x.path && file.path && x.path === file.path,
-            );
-            if (dup) {
-              onError(`已经附过：${file.name}`);
-              return prev;
-            }
-            return [...prev, file];
-          });
+          appendPrepared([], [file]);
         } catch (e: unknown) {
-          onError(e instanceof Error ? e.message : String(e));
+          const error = e instanceof Error ? e.message : String(e);
+          appendPrepared([], [{id:crypto.randomUUID(),name:p.split(/[\\/]/).pop() || p,path:p,mimeType:"",size:0,kind:"other",status:"error",error}]);
+          if (mountedRef.current) onError(error);
         }
       }
     },
-    [onError],
+    [onError, sessionId, appendPrepared],
   );
 
   const retryPendingFile = useCallback(
     async (file: PendingFile) => {
       if (file.path) {
         await importNativePaths([file.path]);
-        setPendingFiles((prev) => prev.filter((f) => f.id !== file.id));
+        if (filesRef.current.some(f => f.id !== file.id && f.path === file.path && f.status === "ready")) {
+          removedAttachmentIds.current.add(file.id);
+          filesRef.current = filesRef.current.filter(f => f.id !== file.id); setPendingFiles(filesRef.current);
+        }
         return;
       }
       if (file.source instanceof File) {
@@ -726,11 +631,11 @@ export const Composer = memo(function Composer({
         onError(`已经附过：${duplicates.join("、")}`);
       }
       if (files.length) {
-        setPendingFiles((prev) => [...prev, ...files]);
+        appendPrepared([], files);
       }
       if (error) onError(error);
     },
-    [addImages, importNativePaths, onError, osPathForFile],
+    [addImages, importNativePaths, onError, osPathForFile, appendPrepared],
   );
 
   useEffect(() => {
@@ -766,6 +671,7 @@ export const Composer = memo(function Composer({
   }, []);
 
   const removePendingImage = useCallback((id: string) => {
+    removedAttachmentIds.current.add(id);
     setPendingImages((prev) => {
       const next = prev.filter((img) => {
         if (img.id === id) revokePendingImagePreview(img);
@@ -777,6 +683,7 @@ export const Composer = memo(function Composer({
   }, []);
 
   const removePendingFile = useCallback((id: string) => {
+    removedAttachmentIds.current.add(id);
     setPendingFiles((prev) => {
       return prev.filter((file) => {
         if (file.id === id) revokePendingFile(file);
@@ -791,8 +698,8 @@ export const Composer = memo(function Composer({
       let text = (overrideText !== undefined ? overrideText : input).trim();
       const draftImages = overrideText !== undefined ? [] : pendingImages;
       const draftFiles = overrideText !== undefined ? [] : pendingFiles;
-      if (draftFiles.some((f) => f.status === "loading")) {
-        onError("附件还没准备好");
+      if (hydratingFilesRef.current.length || draftFiles.some((f) => f.status !== "ready")) {
+        onError("附件还没准备完整，请等它完成或移除出错的附件后再发送。");
         return;
       }
       if (!text) text = mergeComposerTextWithFiles("", draftFiles);
@@ -803,18 +710,16 @@ export const Composer = memo(function Composer({
       if (!text && draftImages.length === 0) return;
       if (conn === "connecting" || !projectOpen) return;
       submittingRef.current = true;
-      snapshotRef.current = {
-        input,
-        images: pendingImages.map((img) => ({ ...img })),
-        files: pendingFiles.map((f) => ({ ...f })),
-        highDetail,
-        cursor: textareaRef.current?.selectionStart ?? input.length,
-      };
+      const submitted = captureDraft();
+      const fingerprint = draftFingerprint(submitted);
+      if (submissionRef.current?.fingerprint !== fingerprint) submissionRef.current = {id:crypto.randomUUID(), fingerprint};
+      submitted.submission = submissionRef.current;
+      if (!writeDraft(submitted)) { submittingRef.current = false; return; }
       try {
         const localPath = parseSoloLocalPath(text);
         if (localPath) {
           try {
-            const file = await window.grokDesktop.readFile(localPath);
+            const file = await window.grokDesktop.readFile(localPath, sessionId || undefined);
             if (file.binary) {
               onError("That path is a binary file, not a text prompt.");
               return;
@@ -830,6 +735,7 @@ export const Composer = memo(function Composer({
           }
         }
 
+        if (!mountedRef.current) return;
         // Desktop-local slash commands (do not send to agent)
         const localMatch = text.match(/^\/([^\s]+)(?:\s+(.*))?$/s);
         if (localMatch) {
@@ -855,15 +761,19 @@ export const Composer = memo(function Composer({
           }
         }
 
-        // Only wipe the draft after the parent accepts (queue / deliver / interject).
+        if (!mountedRef.current) return; // The original draft is still persisted; never submit through a different view.
+        // Only consume this captured snapshot after main's durable acceptance.
         const accepted = await onSubmit({
+          sessionId: sessionId || undefined,
+          cwd: sessionCwd || undefined,
+          deliveryId: submitted.submission?.id,
           text,
           images: images.map((img) => ({ ...img })),
           mode,
           imageQuality,
           origin: "user",
         });
-        if (accepted) clearDraft();
+        if (accepted) consumeSubmittedDraft(submitted);
       } finally {
         submittingRef.current = false;
       }
@@ -877,6 +787,11 @@ export const Composer = memo(function Composer({
       conn,
       projectOpen,
       clearDraft,
+      captureDraft,
+      writeDraft,
+      consumeSubmittedDraft,
+      sessionCwd,
+      sessionId,
       onLocalCommand,
       onError,
       onSubmit,
@@ -1190,7 +1105,8 @@ export const Composer = memo(function Composer({
         {promptQueue.length > 0 && (
           <div className="prompt-queue" aria-label="Queued follow-ups">
             <div className="prompt-queue-head">
-              <span>稍后接着做 · {promptQueue.length} 条</span>
+              <span>{outboxPaused ? "已暂停，内容仍保留" : "本对话的发送记录"} · {promptQueue.length} 条</span>
+              {outboxPaused && <button type="button" className="btn ghost btn-sm" onClick={onResumeQueue}>继续尚未发送的内容</button>}
               <span className="prompt-queue-hint">
                 回车马上插入 · ⌘回车停下再听
               </span>
@@ -1199,6 +1115,7 @@ export const Composer = memo(function Composer({
               {promptQueue.map((q, i) => (
                 <li key={q.id} className="prompt-queue-item">
                   <span className="prompt-queue-idx">{i + 1}</span>
+                  <span title={q.error}>{({queued:"稍后",sending:"正在发送",interjecting:"正在插入",interjected:"已插入，等本轮完成",failed:"失败，可重试",uncertain:"结果待核对",cancelled:"已停止",done:"完成",dismissed:"已移除"})[q.status || "queued"]}</span>
                   {editingQueueId === q.id ? (
                     <input
                       className="prompt-queue-edit"
@@ -1224,7 +1141,7 @@ export const Composer = memo(function Composer({
                     type="button"
                     className="btn ghost btn-sm"
                     title="上移"
-                    disabled={i === 0}
+                    disabled={i === 0 || ["sending", "interjecting", "interjected"].includes(q.status || "")}
                     onClick={() => onQueueMove?.(q.id, -1)}
                   >
                     ↑
@@ -1233,7 +1150,7 @@ export const Composer = memo(function Composer({
                     type="button"
                     className="btn ghost btn-sm"
                     title="下移"
-                    disabled={i === promptQueue.length - 1}
+                    disabled={i === promptQueue.length - 1 || ["sending", "interjecting", "interjected"].includes(q.status || "")}
                     onClick={() => onQueueMove?.(q.id, 1)}
                   >
                     ↓
@@ -1242,6 +1159,7 @@ export const Composer = memo(function Composer({
                     type="button"
                     className="btn ghost btn-sm"
                     title="修改这条稍后的话"
+                    disabled={["sending", "interjecting", "interjected"].includes(q.status || "")}
                     onClick={() => {
                       setEditingQueueId(q.id);
                       setQueueDraft(q.text);
@@ -1253,7 +1171,7 @@ export const Composer = memo(function Composer({
                     type="button"
                     className="btn ghost btn-sm"
                     title="现在改方向（停下当前回复）"
-                    disabled={conn === "connecting"}
+                    disabled={conn === "connecting" || ["sending", "interjecting", "interjected"].includes(q.status || "")}
                     onClick={() => onSendQueuedNow(q.id)}
                   >
                     现在
@@ -1262,6 +1180,7 @@ export const Composer = memo(function Composer({
                     type="button"
                     className="btn ghost btn-sm"
                     title="去掉"
+                    disabled={["sending", "interjecting", "interjected"].includes(q.status || "")}
                     onClick={() => onRemoveQueued(q.id)}
                   >
                     ×
@@ -1280,7 +1199,7 @@ export const Composer = memo(function Composer({
               ? "正在想。要补充就接着打，回车会马上插入…"
               : "先说这件事…"
           }
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => { textTokenRef.current = crypto.randomUUID(); inputRef.current = e.target.value; setInput(e.target.value); }}
           onPaste={(e) => void onPaste(e)}
           onKeyDown={onKeyDown}
           disabled={conn === "connecting"}

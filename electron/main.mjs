@@ -1,3 +1,6 @@
+import { createSessionDelivery } from "./session-delivery.mjs";
+import { registerDeliveryIpc } from "./delivery-ipc.mjs";
+import { resolveMovedSessionCwd } from "./session-move.mjs";
 import { moveSessionFiles, withSessionMove, movableSessionClients, readSessionMoves, recoverSessionMoves } from "./session-move.mjs";
 import { applyWindowAgentAccess } from "./agent-access.mjs";
 import {
@@ -843,7 +846,21 @@ function createWindow(opts = {}) {
   return win;
 }
 
+let sessionDelivery;
+function delivery() {
+  return sessionDelivery ||= createSessionDelivery(path.join(app.getPath("userData"), "outbox"), {
+    notify: event => { for (const ws of windowSessions.values()) send(ws, "agent:delivery", event); },
+    beforeCancel: client => {
+      for (const ws of windowSessions.values()) {
+        if (ws.agent === client || ws.parkedAgents?.get(client.sessionId) === client) clearPendingPermissions(ws, client.sessionId);
+      }
+    },
+    canRelocate: (from, to, sid) => resolveMovedSessionCwd(from, sid) === to,
+  });
+}
+
 function registerIpc() {
+  registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
   ipcMain.on("window:ready", (e) => {
     const reveal = revealByWebContents.get(e.sender);
     if (typeof reveal === "function") reveal();
@@ -1307,7 +1324,10 @@ function registerIpc() {
       // Existing queued opens finish before inspection; new ones see the lock.
       await Promise.all([...windowSessions.values()].map(ws => ws.agentChain.catch(() => {})));
       const clients = movableSessionClients(windowSessions.values(), caller, payload.sessionId);
-      moveSessionFiles(payload, { dryRun: true });
+      if (sessionDelivery?.isActive(payload.sessionId)) throw new Error("这段对话还有正在发送的内容，请先停止或等它完成。");
+      const plan = moveSessionFiles(payload, { dryRun: true });
+      if (plan.unchanged) return plan;
+      if (sessionDelivery) sessionDelivery.mutate(payload.sessionId, "pause");
       for (const {ws,client} of clients) {
         clearPendingPermissions(ws, payload.sessionId);
         if (ws.agent === client) { ws.agent = null; ws.stopBackgroundTaskTail?.(); ws.stopBackgroundTaskTail = null; }
@@ -1315,11 +1335,12 @@ function registerIpc() {
         await client.dispose();
       }
       const result = moveSessionFiles(payload);
+      sessionDelivery?.relocate(payload.sessionId, result.targetCwd);
       if (caller.lastSessionId === payload.sessionId) caller.lastCwd = result.targetCwd;
       rememberProjectSession(result.targetCwd, payload.sessionId);
       for (const ws of windowSessions.values()) send(ws, "sessions:moved", result);
       return result;
-    });
+    }).finally(() => sessionDelivery?.wake(payload.sessionId));
   });
 
   ipcMain.handle("sessions:rename", async (e, { cwd, sessionId, title } = {}) => {
@@ -1406,46 +1427,6 @@ function registerIpc() {
     });
   });
 
-  ipcMain.handle(
-    "agent:prompt",
-    async (e, { text, images = [], imageQuality = "compact", origin = "user", sessionId }) => {
-      const agent = agentForSession(sessionFromEvent(e), sessionId);
-      if (!agent?.ready)
-        throw new Error("Agent not connected. Open a project first.");
-      try {
-        return await agent.prompt(text, {
-          images,
-          imageQuality,
-          origin: origin === "followup" ? "followup" : "user",
-        });
-      } catch (err) {
-        // IPC clones Error.message only — keep the formatted ACP reason.
-        throw new Error(err?.message || String(err));
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "agent:interject",
-    async (
-      e,
-      { text, images = [], imageQuality = "compact", interjectionId, sessionId } = {},
-    ) => {
-      const agent = agentForSession(sessionFromEvent(e), sessionId);
-      if (!agent?.ready)
-        throw new Error("Agent not connected. Open a project first.");
-      try {
-        return await agent.interject(text, {
-          images,
-          imageQuality,
-          interjectionId,
-        });
-      } catch (err) {
-        throw new Error(err?.message || String(err));
-      }
-    },
-  );
-
   ipcMain.handle("agent:set-session-mode", async (e, modeId) => {
     const agent = sessionFromEvent(e)?.agent;
     if (!agent?.ready || !agent.setSessionMode) {
@@ -1498,8 +1479,8 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("agent:compact", async (e, hint = "") => {
-    const agent = sessionFromEvent(e)?.agent;
+  ipcMain.handle("agent:compact", async (e, hint = "", sessionId) => {
+    const agent = agentForSession(sessionFromEvent(e), sessionId);
     if (!agent?.ready)
       throw new Error("Agent not connected. Open a project first.");
     try {
@@ -1520,9 +1501,8 @@ function registerIpc() {
     const ws = sessionFromEvent(e);
     const agent = agentForSession(ws, sessionId);
     if (!agent) return false;
-    clearPendingPermissions(ws, agent.sessionId);
-    agent.cancel();
-    return true;
+    delivery().bind(agent);
+    return delivery().stop(agent.sessionId);
   });
 
   ipcMain.handle("agent:set-allow-writes-session", async (e, value) => {
@@ -2022,8 +2002,8 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("fs:read-file", async (e, filePath) => {
-    const root = sessionFromEvent(e)?.agent?.cwd;
+  ipcMain.handle("fs:read-file", async (e, filePath, sessionId) => {
+    const root = agentForSession(sessionFromEvent(e), sessionId)?.cwd;
     if (!root) throw new Error("No project open");
     const safe = assertPathInProject(root, filePath);
     return readFileForEdit(safe);
@@ -2068,12 +2048,11 @@ function registerIpc() {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("attachments:import", async (e, sourcePath) => {
-    const ws = sessionFromEvent(e);
-    return importAttachmentFile(sourcePath, {
-      cwd: ws?.agent?.cwd,
-      sessionId: ws?.agent?.sessionId,
-    });
+  ipcMain.handle("attachments:import", async (e, sourcePath, sessionId) => {
+    if (!sessionId) throw new Error("附件没有明确的对话归属，未导入。");
+    const agent = agentForSession(sessionFromEvent(e), sessionId);
+    if (!agent) throw new Error("原对话已关闭，附件未导入其他对话。");
+    return importAttachmentFile(sourcePath, { cwd: agent.cwd, sessionId: agent.sessionId });
   });
 
   ipcMain.handle("agent:ping", async (e) => {

@@ -1,0 +1,29 @@
+# 持续草稿、附件和发送箱（连贯单元，不是总任务完成）
+
+输入：9c79f08f07f868e87f4b825d9488ee7ce40e9d22（c27fe56 之后的本机 ASAR fixture 收尾已吸收）。保留 Mac 路径/别名碰撞修复、bc7f7a6 的测试 profile 修复，以及既有 Preview 和 ACP/WK 恢复修复。
+
+## 当前实现
+
+发送箱由主进程按原生 sessionId 持久化，真实发送仍经同一个 GrokAcpClient。界面仅呈现发送状态，不再拥有另一套内存 FIFO / ACP 发送实现。先落盘再确认接收，稳定输入 ID 防止同一次接收重发，终结回执不保留第二份对话正文。不同会话独立运行；暂停、编辑、移动、删除、失败重试、取消后立即发送都操作准确会话。正常 RPC 失败暂停并保留原输入；重启后未确认的发送显示“待核对”，不会自动重发。显式继续只处理未发出的 FIFO，重复不确定发送需人确认。
+
+接受的插话通过原有单一 interject/WK 路径；本轮结束后结算，取消或连接故障留下待核对项。自动压缩的 prep/native compact/catch-up 由捕获的主进程会话承接，切换界面不改它的对象、计时或原话来源。
+
+Composer 捕获本次文本版本、引用和附件快照；迟到的接收回执仅减去本次已接受内容，不抹掉后来输入，包括重输的相同文本。文件导入、文本读取、图片编码有显式 sessionId/cwd；中途切换的附件落回原会话草稿。大图片原件留在 IndexedDB，草稿保留稳定附件 ID；重载期间保留尚未水合的附件清单，未准备好不发送。落盘错误可见，不用“已发送”替代失败。
+
+## 实际证据
+
+Linux x64、Node 22.16.0、Electron 35.7.5；依赖来自之前按 lock 安装的 Linux CI 归档。
+
+- `npm run check`：类型检查成功，752/752 测试通过，无跳过；包含实际符号链接的路径测试，发送箱的双会话 FIFO / 普通限流 / 插话 / 取消恢复 / 受损存储 / 去重 / 顺序 / 暂停测试。
+- `npm run build`：renderer build 成功。
+- `test/delivery-native-client.test.mjs`：生产 IPC → 生产发送箱 → 实际 GrokAcpClient → 独立 stdio 测试进程；覆盖普通 RPC 错误、后台会话、取消后实际重启 / session/load / folder trust / elicitation。这个服务端是测试 peer，不是已登录 Grok。
+- `env -u DISPLAY npm run test:delivery`：真实 Electron + Playwright，挂载生产 Composer / usePromptDelivery / preload / IPC / 发送箱；测试页只提供控制点和模拟 agent 回执。实际验证迟到接收保住新草稿、A 后台 FIFO 不改 B、实际本地文件导入晚到返回 A、大图 Blob 与附件/文本重载、图片编码中切会话不串发。
+- 同一命令的第二个独立 Electron 进程重新打开隔离 profile：大图和草稿仍在；未确认发送不自动重复；明确继续只发送尚未发过的项。
+
+测试页面与 agent 模拟均仅在 test/，正式路径没有模拟模型成功。原生 ACP 的真实账号 / 服务器取消语义、macOS 隔离候选和两台机器仍需宿主复验；这些 Linux / fixture 证据不冒充该层验收。
+
+## 恢复与边界
+
+发送箱：`<userData>/outbox/<sessionId>.json`。草稿仍由现有 desktop UI 状态及 IndexedDB 保存，原生历史仍由 Grok 保存。主进程退出再启动后需要人选择继续未发送内容；不自动重放可能已执行的工具请求。重试旧草稿的同一 submission ID 返回原接收回执；主动新输入使用新 ID。
+
+尚未完成的总任务：跨机工作认识实际进出入口与冲突接续、网页 Pro 开发往返，以及整包最终宿主验收。这一单元完成保存不缩小总范围。旧运输残留已在本地恢复证据目录保全；旧 part-00 仅有三份文件的局部编辑且缺少配套模块，未当作已完成程序。

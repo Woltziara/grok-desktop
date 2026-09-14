@@ -32,24 +32,11 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   renameSession: (opts) => ipcRenderer.invoke("sessions:rename", opts || {}),
   deleteSession: (opts) => ipcRenderer.invoke("sessions:delete", opts || {}),
   openSession: (opts) => ipcRenderer.invoke("sessions:open", opts || {}),
-  prompt: (text, opts) =>
-    ipcRenderer.invoke("agent:prompt", {
-      text,
-      sessionId: opts?.sessionId,
-      origin: opts?.origin === "followup" ? "followup" : "user",
-      images: opts?.images || [],
-      imageQuality: opts?.imageQuality || "compact",
-    }),
-  interject: (text, opts) =>
-    ipcRenderer.invoke("agent:interject", {
-      text,
-      images: opts?.images || [],
-      imageQuality: opts?.imageQuality || "compact",
-      interjectionId: opts?.interjectionId,
-      sessionId: opts?.sessionId,
-    }),
+  submitDelivery: (input) => ipcRenderer.invoke("agent:submit-delivery", input),
+  listOutbox: (sessionId) => ipcRenderer.invoke("agent:outbox", sessionId),
+  mutateOutbox: (sessionId, action, data) => ipcRenderer.invoke("agent:outbox-mutate", { sessionId, action, data }),
   cancel: (sessionId) => ipcRenderer.invoke("agent:cancel", sessionId),
-  compact: (hint) => ipcRenderer.invoke("agent:compact", hint || ""),
+  compact: (hint, sessionId) => ipcRenderer.invoke("agent:compact", hint || "", sessionId),
   rewind: (targetPromptIndex, restoreFiles) =>
     ipcRenderer.invoke("agent:rewind", {
       targetPromptIndex,
@@ -127,7 +114,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   getGitBranch: (cwd) => ipcRenderer.invoke("git:branch", cwd),
   getGitStatus: (cwd) => ipcRenderer.invoke("git:status", cwd),
   getGitDiff: (path, opts) => ipcRenderer.invoke("git:diff", path, opts || {}),
-  readFile: (path) => ipcRenderer.invoke("fs:read-file", path),
+  readFile: (path, sessionId) => ipcRenderer.invoke("fs:read-file", path, sessionId),
   writeFile: (path, content) =>
     ipcRenderer.invoke("fs:write-file", path, content),
   listDir: (path) => ipcRenderer.invoke("fs:list-dir", path),
@@ -148,7 +135,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
       return "";
     }
   },
-  importAttachment: (path) => ipcRenderer.invoke("attachments:import", path),
+  importAttachment: (path, sessionId) => ipcRenderer.invoke("attachments:import", path, sessionId),
   pingAgent: () => ipcRenderer.invoke("agent:ping"),
   artifactPreview: (path) => ipcRenderer.invoke("artifact:preview", path),
   openPreview: (url) =>
@@ -192,6 +179,8 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   on: (channel, handler) => {
     const valid = [
       "agent:session-update",
+      "agent:delivery",
+      "agent:working-knowledge-error",
       "agent:mcp-status",
       "agent:permission-request",
       "agent:session-interjection",
