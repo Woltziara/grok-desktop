@@ -579,6 +579,7 @@ declare global {
       prompt: (
         text: string,
         opts?: {
+          sessionId?: string;
           origin?: "user" | "followup";
           images?: PromptImage[];
           imageQuality?: "compact" | "high";
@@ -590,17 +591,18 @@ declare global {
           images?: PromptImage[];
           imageQuality?: "compact" | "high";
           interjectionId?: string;
+          sessionId?: string;
         },
       ) => Promise<
         | { ok: true; status?: string; interjectionId: string }
-        | { ok: false; reason: "unsupported"; interjectionId: string }
+        | { ok: false; reason: "unsupported" | "turn-ended"; interjectionId: string }
       >;
       setSessionMode: (modeId: string) => Promise<{
         agentSynced: boolean;
         currentModeId: string | null;
         error?: string;
       }>;
-      cancel: () => Promise<boolean>;
+      cancel: (sessionId?: string) => Promise<boolean>;
       compact: (hint?: string) => Promise<unknown>;
       rewind: (
         targetPromptIndex: number,

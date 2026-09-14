@@ -174,7 +174,7 @@ export function agentForSession(ws, sessionId) {
   const sid = String(sessionId || ws.agent?.sessionId || "").trim();
   if (ws.agent?.sessionId && String(ws.agent.sessionId) === sid) return ws.agent;
   if (!sid) return ws.agent || null;
-  return parkedMap(ws).get(sid) || ws.agent || null;
+  return parkedMap(ws).get(sid) || null;
 }
 
 /** Any live or parked agent on this window (account billing). */
@@ -403,7 +403,8 @@ function parkAgentGate(ws, agent, ifCurrent, opts) {
     timeoutMs,
     fallback,
   } = opts;
-  agent.on(event, ({ params, respond }) => {
+  agent.on(event, ({ params: incoming, respond }) => {
+    const params = { ...(incoming || {}), sessionId: agent.sessionId || incoming?.sessionId || incoming?.session_id || "" };
     const reqId = makeReqId(prefix);
     let settled = false;
     /** @type {ReturnType<typeof setTimeout> | null} */
@@ -449,9 +450,9 @@ function parkAgentGate(ws, agent, ifCurrent, opts) {
  * settle wrapper that also dismisses the renderer modal.
  * @param {WindowSession} ws
  */
-export function clearPendingPermissions(ws) {
+export function clearPendingPermissions(ws, sessionId) {
   const owner = ownerIdFor(ws);
-  cancelAllPermissions(undefined, owner);
+  cancelAllPermissions(undefined, owner, sessionId);
   const gates = [
     { map: ws.pendingPlanApprovals, fallback: { type: "abandoned" } },
     { map: ws.pendingUserQuestions, fallback: { type: "declined" } },
@@ -460,8 +461,9 @@ export function clearPendingPermissions(ws) {
   ];
   for (const { map, fallback } of gates) {
     if (!map) continue;
-    const entries = [...map.values()];
-    map.clear();
+    const matching = [...map.entries()].filter(([, entry]) => sessionId == null || String(entry.params?.sessionId || "") === String(sessionId));
+    const entries = matching.map(([, entry]) => entry);
+    for (const [id] of matching) map.delete(id);
     for (const entry of entries) {
       try {
         settleParked(entry, fallback);
@@ -470,7 +472,7 @@ export function clearPendingPermissions(ws) {
       }
     }
   }
-  send(ws, "agent:permissions-cleared", {});
+  send(ws, "agent:permissions-cleared", { sessionId: sessionId ?? null });
 }
 
 /**
@@ -548,7 +550,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
     // Always-approve boundary: must respawn process for CLI flags.
     if (forceRestart && agent) {
       rememberProjectOnWindow(ws, agent.cwd, agent.sessionId);
-      clearPendingPermissions(ws);
+      clearPendingPermissions(ws, agent.sessionId);
       await agent.dispose();
       if (ws.agent === agent) ws.agent = null;
       agent = null;
@@ -561,7 +563,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
     // the in-flight turn. Park the current agent and reuse a parked one.
     if (!forceNew && resumeSessionId) {
       const parked = takeParkedAgent(ws, resumeSessionId);
-      if (parked?.ready && parked.proc) {
+      if (parked?.ready && parked.proc && parked.cwd === cwd) {
         applyAgentAccess(parked, loadDesktopState());
         if (agent && agent !== parked) parkLiveAgent(ws);
         ws.agent = parked;
@@ -569,6 +571,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
         restartBackgroundTaskTail(ws, cwd, parked.sessionId);
         return parked;
       }
+      if (parked) parkedMap(ws).set(String(parked.sessionId), parked);
     }
 
     if (agent?.ready && agent.cwd === cwd && agent.proc) {
@@ -800,6 +803,7 @@ export function ensureAgent(ws, cwd, opts = {}) {
       fallback: { outcome: "cancel" },
     });
 
+    agent.on("working-knowledge-error", (payload) => send(ws, "agent:working-knowledge-error", payload));
     agent.on(
       "stderr",
       ifCurrent((text) => send(ws, "agent:stderr", text)),
@@ -813,8 +817,8 @@ export function ensureAgent(ws, cwd, opts = {}) {
     agent.on("exit", (info) => {
       // Stale exit after replace must not clear the *new* agent's permissions
       if (ws.agent !== agent) return;
-      clearPendingPermissions(ws);
-      send(ws, "agent:exit", info);
+      clearPendingPermissions(ws, agent.sessionId);
+      send(ws, "agent:exit", { ...info, sessionId: agent.sessionId });
     });
     // Do not push agent:ready for conn — renderer only trusts open IPC results
     agent.on(
@@ -1200,9 +1204,10 @@ export function broadcastPermissionMode(mode) {
 export function flushPendingPermissionsForMode(mode) {
   for (const ws of windowSessions.values()) {
     if (ws.disposed || !ws.win || ws.win.isDestroyed()) continue;
-    settlePendingByPolicy(ownerIdFor(ws), {
-      permissionMode: mode,
-      allowWritesThisSession: Boolean(ws.agent?.allowWritesThisSession),
+    const agents = new Set([ws.agent, ...parkedMap(ws).values()]);
+    for (const agent of agents) if (agent?.sessionId) settlePendingByPolicy(ownerIdFor(ws), {
+      sessionId: agent.sessionId, permissionMode: mode,
+      allowWritesThisSession: Boolean(agent.allowWritesThisSession),
     });
   }
 }

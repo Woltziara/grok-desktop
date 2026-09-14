@@ -77,7 +77,7 @@ export function snapshotWorkingKnowledge({ sessionId, cwd } = {}) {
 
 export function setWorkingKnowledgeEnabled(enabled) {
   const root = ensureReady();
-  const cfg = writeConfig(root, { enabled: Boolean(enabled) });
+  const cfg = writeConfig(root, { enabled: Boolean(enabled), enableRevision: crypto.randomUUID() });
   return { enabled: cfg.enabled };
 }
 
@@ -226,7 +226,22 @@ export function wrapOutgoingPrompt({
     probeToken,
     receipt,
     enabled: cfg.enabled,
+    inboxIds: [...new Set([...(built.inboxIds || []), inboxId].filter(Boolean))],
+    bindingRevision: sessionBinding(root, sessionId)?.revision || sessionBinding(root, sessionId)?.at || null,
+    enableRevision: cfg.enableRevision || null,
   };
+}
+
+/** Capture the original once without wrapping/consuming a second ACP turn. */
+export function captureWorkingKnowledgeInterjection({ text, interjectionId, turn }) {
+  if (!turn?.objectId || !String(text || "").trim()) return null;
+  const root = ensureReady();
+  const key = crypto.createHash("sha256").update(`${turn.sessionId}\0${interjectionId}`).digest("hex");
+  return appendInbox(root, {
+    id: `interjection_${key}`, objectId: turn.objectId, text: String(text),
+    sessionId: turn.sessionId, cwd: turn.cwd, source: "user",
+    delivery: "interjection", turnId: turn.id, interjectionId,
+  });
 }
 
 export function consumeTurnOutput({
@@ -235,6 +250,9 @@ export function consumeTurnOutput({
   cwd,
   inboxId,
   objectId,
+  inboxIds,
+  bindingRevision,
+  enableRevision,
   cancelled = false,
 }) {
   const root = ensureReady();
@@ -243,6 +261,12 @@ export function consumeTurnOutput({
   }
   const cfg = readConfig(root);
   const bound = sessionBinding(root, sessionId);
+  if (!cfg.enabled || (enableRevision !== undefined && enableRevision !== (cfg.enableRevision || null))) {
+    return { ok: true, skipped: true, reason: "disabled-or-reenabled" };
+  }
+  if (bindingRevision !== undefined && bindingRevision !== (bound?.revision || bound?.at || null)) {
+    return { ok: true, skipped: true, reason: "binding-changed" };
+  }
   // objectId can deliberately be "" for an unbound turn. Likewise, an
   // existing empty session binding must win over the global selection.
   const oid = objectId ?? (bound ? bound.objectId : cfg.currentObjectId || "");
@@ -252,6 +276,7 @@ export function consumeTurnOutput({
   const result = applyCommitFromAssistantText(root, assistantText || "", {
     objectId: oid,
     inboxId,
+    inboxIds,
     sessionId,
     cwd,
     source: { type: "model", sessionId, cwd },

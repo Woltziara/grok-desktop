@@ -117,13 +117,14 @@ export function slimPermissionParams(params) {
  * @param {string | null | undefined} [ownerId] When set, only that window's gates
  * @returns {Array<{ reqId: string, params: any }>}
  */
-export function listPendingPermissionRequests(ownerId) {
+export function listPendingPermissionRequests(ownerId, sessionId) {
   return [...pending.entries()]
     .filter(([, entry]) =>
       ownerId == null || ownerId === ""
         ? true
         : entry.ownerId === ownerId,
     )
+    .filter(([, entry]) => sessionId == null || String(entry.request?.params?.sessionId || "") === String(sessionId))
     .map(([reqId, entry]) => ({
       reqId,
       params: entry.request?.params || {},
@@ -177,9 +178,10 @@ export function registerPermissionRequest(opts) {
  * @param {string | null | undefined} [ownerId] When set, reject cross-window settle
  * @returns {boolean}
  */
-export function settlePermission(reqId, outcome, ownerId) {
+export function settlePermission(reqId, outcome, ownerId, sessionId) {
   const entry = pending.get(reqId);
   if (!entry) return false;
+  if (sessionId != null && String(entry.request?.params?.sessionId || "") !== String(sessionId)) return false;
   if (ownerId != null && ownerId !== "") {
     if (entry.ownerId !== String(ownerId)) return false;
   }
@@ -201,7 +203,7 @@ export function settlePermission(reqId, outcome, ownerId) {
  * @param {(outcome: any) => any} [cancelOutcome]
  * @param {string | null | undefined} [ownerId] When set, only cancel that window
  */
-export function cancelAllPermissions(cancelOutcome, ownerId) {
+export function cancelAllPermissions(cancelOutcome, ownerId, sessionId) {
   const makeOutcome =
     typeof cancelOutcome === "function"
       ? cancelOutcome
@@ -209,7 +211,8 @@ export function cancelAllPermissions(cancelOutcome, ownerId) {
   const scope =
     ownerId == null || ownerId === "" ? null : String(ownerId);
   const entries = [...pending.entries()].filter(([, entry]) =>
-    scope == null ? true : entry.ownerId === scope,
+    (scope == null || entry.ownerId === scope) &&
+    (sessionId == null || String(entry.request?.params?.sessionId || "") === String(sessionId)),
   );
   for (const [reqId] of entries) {
     pending.delete(reqId);
@@ -258,10 +261,10 @@ export function settlePendingIf(ownerId, pred, pickOutcome) {
 }
 
 /** Grant remaining prompts with allow-once (never agent allow-always). */
-export function settlePendingAllowOnce(ownerId) {
+export function settlePendingAllowOnce(ownerId, sessionId) {
   return settlePendingIf(
     ownerId,
-    () => true,
+    (p) => sessionId == null || String(p.params?.sessionId || "") === String(sessionId),
     (p) =>
       selectedPermissionResult(
         pickAllowOptionId(p.params?.options, { allowAlwaysOk: false }),
@@ -277,7 +280,7 @@ export function settlePendingAllowOnce(ownerId) {
 export function settlePendingByPolicy(ownerId, ctx) {
   return settlePendingIf(
     ownerId,
-    (p) => permissionAutoDecision(p.params, ctx).allow,
+    (p) => (ctx.sessionId == null || String(p.params?.sessionId || "") === String(ctx.sessionId)) && permissionAutoDecision(p.params, ctx).allow,
     (p) =>
       outcomeForAutoDecision(p.params, permissionAutoDecision(p.params, ctx)),
   );

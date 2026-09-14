@@ -51,7 +51,7 @@ function formatItem(item) {
   const scope = item.scope ? ` · 范围：${item.scope}` : "";
   const analysis = item.analysis ? `\n  理由：${item.analysis}` : "";
   const basis = item.basis ? `\n  依据：${item.basis}` : "";
-  return `- [${kind} / ${epi}${q ? ` / ${q}` : ""}] ${item.text}${scope}${analysis}${basis}`;
+  return `- [${item.id ? `id=${item.id} / ` : ""}${kind} / ${epi}${q ? ` / ${q}` : ""}] ${item.text}${scope}${analysis}${basis}`;
 }
 
 function takeByChars(items, budget) {
@@ -140,6 +140,7 @@ export function buildBriefingBody({
   const pending = Array.isArray(inbox) ? inbox : [];
   const inboxPack = takeByChars(
     pending.map((row) => ({
+      id: row.id,
       kind: "utterance",
       epistemic: "user_said",
       status: "pending",
@@ -233,6 +234,7 @@ export function buildWirePrompt({
     briefingBody: body,
     currentVersion: current.version || 0,
     inboxCount: inbox.length,
+    inboxIds: inbox.filter((row) => String(row.text || "").trim().length <= 1200 && body.includes(`id=${row.id} /`)).map((row) => row.id),
     coreCount: coreItems(current.items || []).length,
   };
 }

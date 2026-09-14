@@ -77,8 +77,8 @@ function readJson(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return fallback;
+  } catch (err) {
+    throw new Error(`工作认识文件无法读取，原件未覆盖：${file} (${err.message})`);
   }
 }
 
@@ -92,7 +92,7 @@ function readJsonl(file) {
     try {
       out.push(JSON.parse(t));
     } catch {
-      /* skip broken line */
+      throw new Error(`工作认识记录损坏，已停止写入并保留原件：${file}`);
     }
   }
   return out;
@@ -189,6 +189,7 @@ export function bindSession(root, { sessionId, objectId, cwd, source }) {
     cwd: cwd ? String(cwd) : "",
     source: source || "user",
     at: nowIso(),
+    revision: newId("binding"),
   };
   atomicWrite(bindingsPath(root), `${JSON.stringify(all, null, 2)}\n`);
   return all[sid];
@@ -361,6 +362,13 @@ export function appendInbox(root, item) {
     throw new Error("Inbox missing object id");
   }
   ensureObject(root, item.objectId);
+  const existing = item.id && listInbox(root, item.objectId, "").find((row) => row.id === item.id);
+  if (existing) {
+    if (existing.text !== String(item.text || "") || existing.sessionId !== (item.sessionId || "")) {
+      throw new Error("同一条输入的标识对应了不同内容；原记录已保留。");
+    }
+    return existing;
+  }
   const row = {
     id: item.id || newId("in"),
     objectId: item.objectId,
@@ -372,6 +380,9 @@ export function appendInbox(root, item) {
     status: "pending",
     test: Boolean(item.test),
     source: item.source || "user",
+    delivery: item.delivery || "prompt",
+    turnId: item.turnId || null,
+    interjectionId: item.interjectionId || null,
   };
   appendJsonl(path.join(objectDir(root, item.objectId), "inbox.jsonl"), row);
   return row;
@@ -446,7 +457,8 @@ export function coreItems(items) {
 }
 
 export function nonCoreItems(items) {
-  return (items || []).filter((it) => !CORE_KINDS.has(it.kind));
+  const core = new Set(coreItems(items));
+  return (items || []).filter((it) => !core.has(it));
 }
 
 export function resolveBoundObject(root, { sessionId, cwd, inherit = true }) {

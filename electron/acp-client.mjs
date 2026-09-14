@@ -98,6 +98,7 @@ import {
 } from "./acp-ext-methods.mjs";
 import { shouldAutoTrustFolder } from "./desktop-worktrees.mjs";
 import { debugLog } from "./debug-log.mjs";
+import { captureWorkingKnowledgeInterjection } from "./working-knowledge.mjs";
 import { errorFields, writeCrashLog } from "./crash-log.mjs";
 import {
   scheduledInjectFromInbound,
@@ -304,6 +305,11 @@ export class GrokAcpClient extends EventEmitter {
     this._turnAssistantBuf = "";
     this._turnInboxId = null;
     this._turnObjectId = "";
+    this._activeTurn = null;
+    this._needsPromptRestart = false;
+    this._discardUpdates = false;
+    this._restartPromise = null;
+    this._interjectionCalls = new Map();
     this.terminals = new AcpTerminalManager({
       defaultCwd: this.cwd,
       allowOutsideProject: this.allowOutsideProject,
@@ -421,7 +427,9 @@ export class GrokAcpClient extends EventEmitter {
       windowsHide: true,
     });
 
+    const spawned = this.proc;
     this.proc.on("error", (err) => {
+      if (this.proc !== spawned) return;
       const wrapped = isMissingGrokBinaryError(err)
         ? Object.assign(new Error(missingGrokBinaryMessage(this.grokPath)), {
             code: "ENOENT",
@@ -436,6 +444,7 @@ export class GrokAcpClient extends EventEmitter {
     });
 
     this.proc.on("exit", (code, signal) => {
+      if (this.proc !== spawned) return;
       this.ready = false;
       try {
         this.terminals.disposeAll();
@@ -449,13 +458,14 @@ export class GrokAcpClient extends EventEmitter {
     });
 
     this.proc.stderr.on("data", (chunk) => {
+      if (this.proc !== spawned) return;
       const text = chunk.toString();
       this.stderrBuf += text;
       this.emit("stderr", text);
     });
 
     this.rl = createInterface({ input: this.proc.stdout });
-    this.rl.on("line", (line) => this._onLine(line));
+    this.rl.on("line", (line) => { if (this.proc === spawned) this._onLine(line); });
 
     const init = await this.request(
       "initialize",
@@ -710,9 +720,15 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     const c = classifyInboundMessage(msg);
+    // Once cancelled, untagged events from this transport have no trustworthy
+    // turn identity. Ignore them until a fresh transport resumes the same session.
+    if (this._discardUpdates && c.kind === "session-update") {
+      if (c.expectsEmptyAck) { this._ensureOnce().beginRequest(c.id); this._respond(c.id, {}); }
+      return;
+    }
     const interjection = unwrapSessionInterjection(msg.method, msg.params);
     if (interjection) {
-      this.emit("session-interjection", interjection);
+      if (!this._discardUpdates) this.emit("session-interjection", interjection);
       if (msg.id !== undefined) {
         this._ensureOnce().beginRequest(msg.id);
         this._respond(msg.id, {});
@@ -739,7 +755,7 @@ export class GrokAcpClient extends EventEmitter {
 
     if (c.kind === "session-update") {
       // Progress only — does not complete tools; agent still needs client RPCs.
-      if (this.turnOpen) {
+      if (this.turnOpen && (!c.params?.sessionId || c.params.sessionId === this.sessionId)) {
         const update = c.params?.update || c.params;
         const kind = update?.sessionUpdate || update?.session_update;
         if (kind === "agent_message_chunk") {
@@ -758,15 +774,22 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     if (c.kind === "server-request") {
+      if (this._discardUpdates) {
+        this._ensureOnce().beginRequest(c.id);
+        this._respond(c.id, null, { code: -32800, message: "Turn cancelled" });
+        return;
+      }
       // Fresh response slot for this id (JSON-RPC may reuse ids after completion).
       this._ensureOnce().beginRequest(c.id);
       // Concurrent handlers (grok-build gateway spawn): one long permission
       // wait must not block later fs/* / terminal/* lines.
+      const transport = this.proc;
       this._handleServerRequest({
         method: c.method,
         id: c.id,
         params: c.params,
       }).catch((err) => {
+        if (this.proc !== transport) return;
         debugLog("acp", "server-request-error", {
           id: c.id,
           method: c.method,
@@ -782,6 +805,7 @@ export class GrokAcpClient extends EventEmitter {
     }
 
     if (c.kind === "notification") {
+      if (this._discardUpdates) return;
       const scheduled = scheduledTaskUpdateFromInbound(c.method, c.params);
       if (scheduled) {
         this.emit("session-update", this._stampOutboundUpdate(scheduled));
@@ -814,6 +838,8 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   async _handleServerRequest(msg) {
+    const transport = this.proc;
+    const respond = (...args) => { if (this.proc === transport) this._respond(...args); };
     const { method, params, id } = msg;
     const started = Date.now();
     debugLog("acp", "server-request", {
@@ -828,7 +854,7 @@ export class GrokAcpClient extends EventEmitter {
 
     const extCtx = {
       emitter: this,
-      respond: (rid, result, error) => this._respond(rid, result, error),
+      respond: (rid, result, error) => respond(rid, result, error),
       sessionDir: () => this.sessionDir(),
     };
 
@@ -892,7 +918,7 @@ export class GrokAcpClient extends EventEmitter {
           allowWritesThisSession: this.allowWritesThisSession,
           listenerCount: this.listenerCount("permission-request"),
           gates: this._openPermissionGates,
-          respond: (rid, result, error) => this._respond(rid, result, error),
+          respond: (rid, result, error) => respond(rid, result, error),
           onPark: ({ params: p, oneshot, requestId }) => {
             this.emit("permission-request", {
               params: p,
@@ -937,11 +963,11 @@ export class GrokAcpClient extends EventEmitter {
               chars: result.content?.length,
             });
           }
-          this._respond(id, { content: result.content });
+          respond(id, { content: result.content });
         } catch (err) {
           if (err?.code === "ENOENT") {
             debugLog("acp", "fs-read-missing", { path: filePath });
-            this._respond(id, { content: "" });
+            respond(id, { content: "" });
             return;
           }
           throw err;
@@ -958,13 +984,14 @@ export class GrokAcpClient extends EventEmitter {
               ? String(params.text)
               : "";
         await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+        if (this.proc !== transport || this._discardUpdates) throw new Error("Turn cancelled");
         await fs.promises.writeFile(filePath, content, "utf8");
         debugLog("acp", "fs-write-ok", {
           path: filePath,
           bytes: content.length,
         });
         // ACP: empty result on success (null or {})
-        this._respond(id, {});
+        respond(id, {});
         return;
       }
 
@@ -977,7 +1004,7 @@ export class GrokAcpClient extends EventEmitter {
         id,
       });
       debugLog("acp", "unhandled-method", { id, method: String(method || "") });
-      this._respond(id, null, {
+      respond(id, null, {
         code: -32601,
         message: `Unhandled client method: ${method}`,
       });
@@ -997,38 +1024,40 @@ export class GrokAcpClient extends EventEmitter {
    * @param {number|string} id
    */
   async _handleTerminal(method, params, id) {
+    const transport = this.proc;
+    const respond = (...args) => { if (this.proc === transport) this._respond(...args); };
     try {
       switch (method) {
         case "terminal/create": {
           const result = this.terminals.create(params || {});
-          this._respond(id, result);
+          respond(id, result);
           return;
         }
         case "terminal/output": {
-          this._respond(id, this.terminals.output(params || {}));
+          respond(id, this.terminals.output(params || {}));
           return;
         }
         case "terminal/wait_for_exit": {
           const status = await this.terminals.waitForExit(params || {});
-          this._respond(id, status);
+          respond(id, status);
           return;
         }
         case "terminal/kill": {
-          this._respond(id, this.terminals.kill(params || {}));
+          respond(id, this.terminals.kill(params || {}));
           return;
         }
         case "terminal/release": {
-          this._respond(id, this.terminals.release(params || {}));
+          respond(id, this.terminals.release(params || {}));
           return;
         }
         default:
-          this._respond(id, null, {
+          respond(id, null, {
             code: -32601,
             message: `Unhandled terminal method: ${method}`,
           });
       }
     } catch (err) {
-      this._respond(id, null, {
+      respond(id, null, {
         code: jsonRpcErrorCode(err?.code),
         message: err?.message || String(err),
       });
@@ -1655,6 +1684,34 @@ export class GrokAcpClient extends EventEmitter {
    */
   async interject(text, { images = [], imageQuality = "compact", interjectionId } = {}) {
     if (!this.sessionId) throw new Error("No ACP session");
+    const turn = this._activeTurn;
+    if (!this.turnOpen || !turn || turn.cancelled || turn.finishing) {
+      return { ok: false, reason: "turn-ended", interjectionId: String(interjectionId || "") };
+    }
+    const id = String(interjectionId || "").trim() || crypto.randomUUID();
+    const signature = crypto.createHash("sha256").update(JSON.stringify({ text, images })).digest("hex");
+    this._interjectionCalls ||= new Map();
+    const previous = this._interjectionCalls.get(id);
+    if (previous) {
+      if (previous.signature !== signature) throw new Error("Interjection id reused with different input");
+      return previous.promise;
+    }
+    // Durably record before calling ACP. Failure/cancel leaves the original pending.
+    const capture = this._promptLifecycle.captureInterjection || captureWorkingKnowledgeInterjection;
+    const row = capture({ text: String(text || ""), interjectionId: id, turn });
+    const promise = this._sendInterjection(text, { images, imageQuality, interjectionId: id }).then((result) => {
+      if (result?.ok && !turn.cancelled && row?.id && !turn.inboxIds.includes(row.id)) turn.inboxIds.push(row.id);
+      return result;
+    });
+    turn.interjections ||= [];
+    turn.interjections.push(promise);
+    this._interjectionCalls.set(id, { signature, promise });
+    try { return await promise; }
+    catch (err) { this._interjectionCalls.delete(id); throw err; }
+  }
+
+  async _sendInterjection(text, { images = [], imageQuality = "compact", interjectionId } = {}) {
+    if (!this.sessionId) throw new Error("No ACP session");
     const trimmed = String(text || "").trim();
     const list = Array.isArray(images) ? images : [];
     if (!trimmed && list.length === 0) {
@@ -1706,67 +1763,83 @@ export class GrokAcpClient extends EventEmitter {
     return interjectFromAttemptErrors(misses, id);
   }
 
+  /** Resume on a fresh transport after cancel: ACP updates have no per-turn id. */
+  async _resumeAfterCancellation() {
+    if (!this._needsPromptRestart) return;
+    if (!this._restartPromise) {
+      const sessionId = this.sessionId;
+      const mode = this.currentModeId;
+      this._restartPromise = (async () => {
+        await this.dispose();
+        this._discardUpdates = true; // suppress session/load replay already visible in the UI
+        await this.start({ resumeSessionId: sessionId });
+        if (mode && mode !== this.currentModeId) await this.setSessionMode(mode);
+        this._needsPromptRestart = false;
+        this._discardUpdates = false;
+      })().finally(() => { this._restartPromise = null; });
+    }
+    return this._restartPromise;
+  }
+
   async prompt(text, { images = [], imageQuality = "compact", origin = "user" } = {}) {
+    if (this._needsPromptRestart) await this._resumeAfterCancellation();
     if (!this.sessionId) throw new Error("No ACP session");
-    const prepared = this._promptLifecycle.prepare({
-      text,
-      sessionId: this.sessionId,
-      cwd: this.cwd,
-      origin,
-    });
+    if (this.turnOpen) throw new Error("A turn is already running; use interject or queue");
+    const sessionId = this.sessionId;
+    const cwd = this.cwd;
+    const prepared = this._promptLifecycle.prepare({ text, sessionId, cwd, origin });
     const { wrapped, prompt } = prepared;
     for (const img of images) {
       const compressed = compressPromptImage(img, imageQuality);
-      prompt.push({
-        type: "image",
-        data: compressed.data,
-        mimeType: compressed.mimeType || "image/png",
-      });
+      prompt.push({ type: "image", data: compressed.data, mimeType: compressed.mimeType || "image/png" });
     }
-    // Long agent turns — generous timeout
+    const turn = {
+      id: crypto.randomUUID(), sessionId, cwd, inboxId: wrapped.inboxId,
+      objectId: wrapped.objectId || "", cancelled: false,
+      inboxIds: [...(wrapped.inboxIds || (wrapped.inboxId ? [wrapped.inboxId] : []))],
+      bindingRevision: wrapped.bindingRevision, enableRevision: wrapped.enableRevision,
+    };
+    this._activeTurn = turn;
     this.turnOpen = true;
     this._turnCancelled = false;
     this._turnAssistantBuf = "";
-    this._turnInboxId = wrapped.inboxId;
-    this._turnObjectId = wrapped.objectId || "";
+    this._turnInboxId = turn.inboxId;
+    this._turnObjectId = turn.objectId;
+    let completed = false;
     try {
-      const result = await this.request(
-        "session/prompt",
-        {
-          sessionId: this.sessionId,
-          prompt,
-        },
-        { timeoutMs: 30 * 60_000 },
-      );
+      const result = await this.request("session/prompt", { sessionId, prompt }, { timeoutMs: 30 * 60_000 });
+      if (this._activeTurn !== turn || turn.cancelled) throw new Error("cancelled");
+      turn.finishing = true;
+      await Promise.allSettled(turn.interjections || []);
+      if (this._activeTurn !== turn || turn.cancelled) throw new Error("cancelled");
+      const cancelled = result?.stopReason === "cancelled" || result?.stop_reason === "cancelled";
       try {
-        this._promptLifecycle.consume({
-          assistantText: this._turnAssistantBuf,
-          sessionId: this.sessionId,
-          cwd: this.cwd,
-          inboxId: this._turnInboxId,
-          objectId: this._turnObjectId,
-          cancelled: this._turnCancelled,
+        const receipt = this._promptLifecycle.consume({
+          ...turn, assistantText: this._turnAssistantBuf, cancelled,
         });
+        if (receipt?.ok === false) this.emit("working-knowledge-error", { sessionId, error: receipt.error });
       } catch (err) {
-        debugLog("acp", "working-knowledge-consume-failed", {
-          error: err?.message || String(err),
-        });
+        this.emit("working-knowledge-error", { sessionId, error: err?.message || String(err) });
+        debugLog("acp", "working-knowledge-consume-failed", { error: err?.message || String(err) });
       }
+      completed = !cancelled;
       return result;
+    } catch (err) {
+      if (this._activeTurn === turn) { this._needsPromptRestart = true; this._discardUpdates = true; }
+      throw err;
     } finally {
-      this.turnOpen = false;
-      const cancelled = this._turnCancelled;
-      this._turnCancelled = false;
-      this._turnAssistantBuf = "";
-      this._turnInboxId = null;
-      this._turnObjectId = "";
-      if (!cancelled) {
-        const next = this._cronQueue.shift();
-        if (next) {
-          void this.prompt(next, { origin: "scheduled" }).catch((err) => {
-            debugLog("acp", "scheduled-inject-failed", {
-              error: err?.message || String(err),
-            });
+      // An older finally must never clear the next turn's state.
+      if (this._activeTurn === turn) {
+        this._activeTurn = null;
+        this.turnOpen = false;
+        this._turnCancelled = false;
+        this._turnAssistantBuf = "";
+        this._turnInboxId = null;
+        this._turnObjectId = "";
+        if (completed && !turn.cancelled) {
+          const next = this._cronQueue.shift();
+          if (next) void this.prompt(next, { origin: "scheduled" }).catch((err) => {
+            debugLog("acp", "scheduled-inject-failed", { error: err?.message || String(err) });
           });
         }
       }
@@ -1805,6 +1878,10 @@ export class GrokAcpClient extends EventEmitter {
     // clearPendingPermissions. Kill tool shells so terminal/wait_for_exit
     // cannot park the turn after cancel.
     this._turnCancelled = true;
+    if (this._activeTurn) this._activeTurn.cancelled = true;
+    this._needsPromptRestart = true;
+    this._discardUpdates = true;
+    this._cronQueue = [];
     this._cancelOpenPermissionGates();
     this.turnOpen = false;
     try {
@@ -2080,6 +2157,8 @@ export class GrokAcpClient extends EventEmitter {
   }
 
   async dispose() {
+    if (this._activeTurn) this._activeTurn.cancelled = true;
+    this._discardUpdates = true;
     this._rejectAllPending(new Error("Agent disposed"));
     try {
       this._once?.clear();
@@ -2097,10 +2176,9 @@ export class GrokAcpClient extends EventEmitter {
     } catch {
       /* ignore */
     }
-    if (this.proc && !this.proc.killed) {
-      this.proc.kill();
-    }
-    this.proc = null;
+    const proc = this.proc;
+    this.proc = null; // fence exit/line callbacks before terminating the old process
+    if (proc && !proc.killed) proc.kill();
     this.ready = false;
     this.sessionId = null;
   }

@@ -9,6 +9,7 @@ import {
   markInbox,
   newId,
   readCurrent,
+  readRecords,
   rememberCommit,
   writeRecord,
 } from "./store.mjs";
@@ -60,15 +61,18 @@ function normalizeChange(raw) {
   };
 }
 
+function allowedInboxIds(ctx) {
+  return new Set([ctx.inboxId, ...(Array.isArray(ctx.inboxIds) ? ctx.inboxIds : [])].filter(Boolean));
+}
+
 function exactUserEvidence(root, objectId, ctx, change) {
-  if (!ctx.fromModel || !ctx.inboxId) return null;
-  const inbox = listInbox(root, objectId, "pending").find(
-    (row) => row.id === ctx.inboxId && row.source === "user",
-  );
-  if (!inbox) return null;
-  const quote = String(inbox.text || "").trim();
-  if (!quote || change.sourceQuote !== quote || change.text !== quote) return null;
-  return inbox;
+  if (!ctx.fromModel) return null;
+  const allowed = allowedInboxIds(ctx);
+  return listInbox(root, objectId, "pending").find((row) => {
+    const quote = String(row.text || "").trim();
+    return allowed.has(row.id) && row.source === "user" && quote &&
+      change.sourceQuote === quote && change.text === quote;
+  }) || null;
 }
 
 function protectedSupersedeTargets(current, change) {
@@ -157,6 +161,14 @@ export function applyCommit(root, commit, ctx) {
     }
     const userInbox = exactUserEvidence(root, objectId, ctx, change);
     const protectedTargets = protectedSupersedeTargets(current, change);
+    // A stale model cannot re-create a withdrawn record simply by choosing a new id.
+    const latest = new Map(readRecords(root, objectId).filter((r) => r?.id).map((r) => [r.id, r]));
+    const withdrawn = [...latest.values()].some((r) => r.status === "withdrawn" &&
+      (r.text === change.text || (change.supersedes || []).includes(r.id)));
+    if (ctx.fromModel && withdrawn && !userInbox) {
+      errors.push("model cannot revive a withdrawn record without new exact user evidence");
+      continue;
+    }
     if (ctx.fromModel && protectedTargets.length && !userInbox) {
       errors.push("model cannot supersede protected user record without exact inbox quote");
       continue;
@@ -193,8 +205,11 @@ export function applyCommit(root, commit, ctx) {
       idempotencyKey: key || undefined,
     });
     written.push(rec.record);
-    for (const id of change.inboxIds) inboxIds.add(id);
-    if (ctx.inboxId) inboxIds.add(ctx.inboxId);
+    const allowed = allowedInboxIds(ctx);
+    for (const id of change.inboxIds) {
+      if (!ctx.fromModel || allowed.has(id)) inboxIds.add(id);
+    }
+    if (userInbox) inboxIds.add(userInbox.id);
   }
 
   if (written.length === 0) {

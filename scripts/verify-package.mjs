@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
+const plistParser = require("plist");
 
 function fail(message) {
   throw new Error(`[package-integrity] ${message}`);
@@ -16,6 +17,12 @@ function fail(message) {
 
 function plist(file) {
   try {
+    const bytes = fs.readFileSync(file);
+    // XML plists are portable; keep macOS plutil for binary plists only.
+    // This also exercises real ASAR/Helper checks in Linux CI instead of skipping them.
+    if (bytes.subarray(0, 6).toString() !== "bplist") {
+      return plistParser.parse(bytes.toString("utf8"));
+    }
     return JSON.parse(execFileSync("plutil", ["-convert", "json", "-o", "-", file], { encoding: "utf8" }));
   } catch (err) {
     fail(`cannot read Info.plist (${file}): ${err.message}`);

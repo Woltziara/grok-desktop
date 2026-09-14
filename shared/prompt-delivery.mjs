@@ -33,7 +33,7 @@ export function isInterjectUnsupported(result) {
  */
 export function interjectFollowUp(result, thrown) {
   if (thrown) return "error";
-  if (isInterjectUnsupported(result)) return "queue";
+  if (isInterjectUnsupported(result) || result?.reason === "turn-ended") return "queue";
   if (result && typeof result === "object" && result.ok === false) {
     return "error";
   }

@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   prompt: (text, opts) =>
     ipcRenderer.invoke("agent:prompt", {
       text,
+      sessionId: opts?.sessionId,
       origin: opts?.origin === "followup" ? "followup" : "user",
       images: opts?.images || [],
       imageQuality: opts?.imageQuality || "compact",
@@ -38,8 +39,9 @@ contextBridge.exposeInMainWorld("grokDesktop", {
       images: opts?.images || [],
       imageQuality: opts?.imageQuality || "compact",
       interjectionId: opts?.interjectionId,
+      sessionId: opts?.sessionId,
     }),
-  cancel: () => ipcRenderer.invoke("agent:cancel"),
+  cancel: (sessionId) => ipcRenderer.invoke("agent:cancel", sessionId),
   compact: (hint) => ipcRenderer.invoke("agent:compact", hint || ""),
   rewind: (targetPromptIndex, restoreFiles) =>
     ipcRenderer.invoke("agent:rewind", {

@@ -198,7 +198,7 @@ export function useAgentEvents(opts: {
           const next = list.filter((p): p is PermissionRequest => {
             if (!p?.reqId) return false;
             const sid = String(p.params?.sessionId || "");
-            if (!sid || !liveSid) return true;
+            if (!sid || !liveSid) return false;
             return sid === liveSid;
           });
           // Avoid re-render loops (and scroll side-effects) when nothing changed.
@@ -231,7 +231,7 @@ export function useAgentEvents(opts: {
     const forLiveSession = (rows: Array<{ reqId: string; params?: Record<string, any> }>) =>
       rows.filter((row) => {
         const sid = String(row?.params?.sessionId || "");
-        return !sid || (Boolean(liveSid) && sid === liveSid);
+        return Boolean(liveSid) && sid === liveSid;
       });
     const [plans, trusts, questions, elicits] = await Promise.all([
       api.listPendingPlanApprovals?.().catch(() => []) ?? [],
@@ -239,6 +239,7 @@ export function useAgentEvents(opts: {
       api.listPendingUserQuestions?.().catch(() => []) ?? [],
       api.listPendingMcpElicits?.().catch(() => []) ?? [],
     ]);
+    if (String(sessionIdRef?.current || "") !== liveSid) return;
     const plan = forLiveSession(plans)[0];
     setPlanApproval(
       plan
@@ -519,7 +520,8 @@ export function useAgentEvents(opts: {
           return null;
         });
       }),
-      window.grokDesktop.on("agent:permissions-cleared", () => {
+      window.grokDesktop.on("agent:permissions-cleared", (payload) => {
+        if (payload?.sessionId && payload.sessionId !== sessionIdRef?.current) return;
         setPermissions([]);
         setPlanApproval(null);
         setUserQuestion(null);
@@ -532,6 +534,10 @@ export function useAgentEvents(opts: {
             ?.allowWritesThisSession),
         );
       }),
+      window.grokDesktop.on("agent:working-knowledge-error", (payload) => {
+        if (payload?.sessionId !== sessionIdRef?.current) return;
+        setError(`工作认识没有完成更新，原话仍保留：${payload?.error || "请查看工作认识面板"}`);
+      }),
       window.grokDesktop.on("agent:error", (payload) => {
         if (openingRef.current) return;
         setConn("error");
@@ -540,8 +546,7 @@ export function useAgentEvents(opts: {
       window.grokDesktop.on("agent:exit", () => {
         if (openingRef.current) return;
         setConn("error");
-        setSessionId(null);
-        setError("Agent process exited");
+        setError("连接已中断，当前对话与草稿仍保留。请重新连接后继续。");
         setPermissions([]);
         setPlanApproval(null);
         setUserQuestion(null);

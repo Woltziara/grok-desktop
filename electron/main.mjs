@@ -1380,8 +1380,8 @@ function registerIpc() {
 
   ipcMain.handle(
     "agent:prompt",
-    async (e, { text, images = [], imageQuality = "compact", origin = "user" }) => {
-      const agent = sessionFromEvent(e)?.agent;
+    async (e, { text, images = [], imageQuality = "compact", origin = "user", sessionId }) => {
+      const agent = agentForSession(sessionFromEvent(e), sessionId);
       if (!agent?.ready)
         throw new Error("Agent not connected. Open a project first.");
       try {
@@ -1401,9 +1401,9 @@ function registerIpc() {
     "agent:interject",
     async (
       e,
-      { text, images = [], imageQuality = "compact", interjectionId } = {},
+      { text, images = [], imageQuality = "compact", interjectionId, sessionId } = {},
     ) => {
-      const agent = sessionFromEvent(e)?.agent;
+      const agent = agentForSession(sessionFromEvent(e), sessionId);
       if (!agent?.ready)
         throw new Error("Agent not connected. Open a project first.");
       try {
@@ -1485,23 +1485,26 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("agent:cancel", async (e) => {
+  ipcMain.handle("agent:cancel", async (e, sessionId) => {
     // ACP turn cancel: answer every open agent→client request (tool
     // permissions + plan approval + ask-user), dismiss renderer modals,
     // then notify the agent and tear down tool terminals.
     const ws = sessionFromEvent(e);
-    if (ws) clearPendingPermissions(ws);
-    ws?.agent?.cancel();
+    const agent = agentForSession(ws, sessionId);
+    if (!agent) return false;
+    clearPendingPermissions(ws, agent.sessionId);
+    agent.cancel();
     return true;
   });
 
   ipcMain.handle("agent:set-allow-writes-session", async (e, value) => {
     const ws = sessionFromEvent(e);
     if (!ws?.agent) return { allowWritesThisSession: false };
+    const agent = ws.agent;
     const run = () => {
-      if (!ws.agent) return { allowWritesThisSession: false };
-      const on = ws.agent.setAllowWritesThisSession(Boolean(value));
-      if (on) settlePendingAllowOnce(ownerIdFor(ws));
+      if (ws.agent !== agent) throw new Error("对话已切换，请在原对话中修改权限。 ");
+      const on = agent.setAllowWritesThisSession(Boolean(value));
+      if (on) settlePendingAllowOnce(ownerIdFor(ws), agent.sessionId);
       return { allowWritesThisSession: on };
     };
     const p = Promise.resolve(ws.writesChain).then(run, run);
@@ -1515,7 +1518,7 @@ function registerIpc() {
   ipcMain.handle("agent:permission-respond", async (e, { reqId, outcome }) => {
     const ws = sessionFromEvent(e);
     if (!ws) return false;
-    return settlePermission(reqId, outcome, ownerIdFor(ws));
+    return settlePermission(reqId, outcome, ownerIdFor(ws), ws.agent?.sessionId || "");
   });
 
   setOnEnableAlwaysApprove(() => {
@@ -1537,9 +1540,9 @@ function registerIpc() {
     if (!ws) return [];
     const all = listPendingPermissionRequests(ownerIdFor(ws));
     const sid = ws.agent?.sessionId;
-    if (!sid) return all;
+    if (!sid) return [];
     return all.filter(
-      (p) => !p?.params?.sessionId || String(p.params.sessionId) === String(sid),
+      (p) => String(p?.params?.sessionId || "") === String(sid),
     );
   });
 
@@ -1554,7 +1557,7 @@ function registerIpc() {
       if (!ws) return [];
       const sid = ws.agent?.sessionId;
       return listParked(ws[field]).filter(
-        (entry) => !sid || !entry.params?.sessionId || String(entry.params.sessionId) === String(sid),
+        (entry) => Boolean(sid) && String(entry.params?.sessionId || "") === String(sid),
       );
     });
   }
@@ -1564,8 +1567,10 @@ function registerIpc() {
    * @param {string} reqId
    * @param {any} fallback
    */
-  const settleParkedIpc = (map, reqId, fallback) => {
-    return settleParked(map?.get(reqId), fallback);
+  const settleParkedIpc = (map, reqId, fallback, sessionId) => {
+    const entry = map?.get(reqId);
+    if (!sessionId || String(entry?.params?.sessionId || "") !== String(sessionId)) return false;
+    return settleParked(entry, fallback);
   };
 
   ipcMain.handle("agent:plan-approval-respond", async (e, { reqId, decision }) => {
@@ -1574,6 +1579,7 @@ function registerIpc() {
       ws?.pendingPlanApprovals,
       reqId,
       decision || { type: "abandoned" },
+      ws?.agent?.sessionId,
     );
   });
 
@@ -1583,6 +1589,7 @@ function registerIpc() {
       ws?.pendingUserQuestions,
       reqId,
       decision || { type: "declined" },
+      ws?.agent?.sessionId,
     );
   });
 
@@ -1592,6 +1599,7 @@ function registerIpc() {
       ws?.pendingFolderTrust,
       reqId,
       decision || { outcome: "reject" },
+      ws?.agent?.sessionId,
     );
   });
 
@@ -1601,6 +1609,7 @@ function registerIpc() {
       ws?.pendingMcpElicits,
       reqId,
       decision || { outcome: "cancel" },
+      ws?.agent?.sessionId,
     );
   });
 
