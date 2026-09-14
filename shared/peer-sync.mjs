@@ -1,6 +1,6 @@
 /**
- * Two-Mac alignment: newer file overwrites older.
- * Grok home (sessions/memory/skills) + ~/Projects.
+ * Legacy formatting helpers retained for recovery diagnostics only.
+ * Active transfer uses explicit continuation packs, never time-based overwrite.
  */
 
 export const PROJECTS_EXCLUDES = [
@@ -41,7 +41,7 @@ export const GROK_EXCLUDES = [
   "*.lock",
   "active_sessions.json",
   "leader.sock",
-  // Login stays per-machine unless the person taps 「把登录送到对面」.
+  // Login always stays per-machine.
   "auth.json",
 ];
 
@@ -51,8 +51,6 @@ export const GROK_INCLUDE_TOP = [
   "skills",
   "rules",
   "hooks",
-  "config.toml",
-  "trusted_folders.toml",
   "slash-mru.json",
 ];
 
@@ -141,5 +139,5 @@ export function alignmentPreviewText(dirs) {
   const bits = [];
   if (pull.length) bits.push(`从对面拿来 ${pull.length} 份`);
   if (push.length) bits.push(`从这边送过去 ${push.length} 份`);
-  return bits.join("，") + "。新的会盖掉旧的。";
+  return bits.join("，") + "。先核对范围，冲突需明确选择，原件会保留。";
 }

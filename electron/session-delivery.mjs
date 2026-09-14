@@ -48,6 +48,12 @@ function finish(row, status) {
   }
 }
 
+export function assertSessionOutbox(value,id,name="发送记录") {
+    if (value?.schema !== 1 || value.sessionId !== id || !Array.isArray(value.items) || !Number.isSafeInteger(value.revision) || value.items.some(i => !i || typeof i.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(i.id) || !STATES.has(i.status))) throw new Error(`发送记录版本或内容不兼容，原件未改写：${name}`);
+    if (new Set(value.items.map(i => i.id)).size !== value.items.length || value.revision < 0 || value.items.some(i => !TERMINAL.has(i.status) && (typeof i.text !== 'string' || !Array.isArray(i.images) || i.images.some(image => typeof image.data !== 'string' || typeof image.mimeType !== 'string') || signature(i) !== i.signature))) throw new Error(`发送记录校验失败，原件未改写：${name}`);
+  return value;
+}
+
 export function createSessionOutbox(root, { write = atomicWrite } = {}) {
   const initialized = new Set();
   function file(id) { return path.join(root, `${sid(id)}.json`); }
@@ -56,8 +62,7 @@ export function createSessionOutbox(root, { write = atomicWrite } = {}) {
     if (!fs.existsSync(name)) return { schema: 1, sessionId: id, cwd: '', revision: 0, paused: false, items: [] };
     let value;
     try { value = JSON.parse(fs.readFileSync(name, 'utf8')); } catch { throw new Error(`这段对话的发送记录损坏，原件未改写：${name}`); }
-    if (value?.schema !== 1 || value.sessionId !== id || !Array.isArray(value.items) || !Number.isSafeInteger(value.revision) || value.items.some(i => !i || typeof i.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(i.id) || !STATES.has(i.status))) throw new Error(`发送记录版本或内容不兼容，原件未改写：${name}`);
-    if (new Set(value.items.map(i => i.id)).size !== value.items.length || value.revision < 0 || value.items.some(i => !TERMINAL.has(i.status) && (typeof i.text !== 'string' || !Array.isArray(i.images) || i.images.some(image => typeof image.data !== 'string' || typeof image.mimeType !== 'string') || signature(i) !== i.signature))) throw new Error(`发送记录校验失败，原件未改写：${name}`);
+    assertSessionOutbox(value, id, name);
     return value;
   }
   function save(id, value) {

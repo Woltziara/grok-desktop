@@ -1,3 +1,4 @@
+import { assertContinuationSettled } from './continuation-pack.mjs';
 import { assertSessionNotMoving, resolveMovedSessionCwd } from "./session-move.mjs";
 import { applyAgentAccess } from "./agent-access.mjs";
 /**
@@ -540,6 +541,7 @@ export async function disposeOrphanClient(client) {
 export function ensureAgent(ws, cwd, opts = {}) {
   const run = async () => {
     assertSessionNotMoving(opts.resumeSessionId);
+    if(opts.resumeSessionId) assertContinuationSettled(app.getPath("userData"),opts.resumeSessionId);
     if (opts.resumeSessionId) cwd = resolveMovedSessionCwd(cwd, opts.resumeSessionId);
     const gen = ws.generation;
     if (!isSessionLive(ws, gen)) {

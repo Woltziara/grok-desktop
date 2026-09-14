@@ -373,6 +373,7 @@ export type OpenProjectResult = {
 };
 
 export type AppInfo = {
+  buildIdentity?: {schema:number;version:string;sourceCommit:string|null;sourceDigest:string|null;dirty:boolean|null;unverified?:boolean};
   version: string;
   pid: number;
   executable: string;
@@ -517,6 +518,17 @@ declare global {
     grokDesktop: {
       /** First painted frame — main shows the shell and closes the native splash. */
       windowReady: () => void;
+      continuationResult: (token:string) => Promise<{cwd:string;sessionId:string;flow:import('./lib/continuation-flow').CarriedFlow|null}>;
+      acknowledgeContinuationFlow: (token:string) => Promise<boolean>;
+      listContinuations: () => Promise<SessionSummary[]>;
+      selectContinuationMaterials: (cwd:string) => Promise<string[]>;
+      exportContinuation: (input:{cwd:string;sessionId:string;materials:string[];flow:import('./lib/continuation-flow').CarriedFlow}) => Promise<{ok?:boolean;cancelled?:boolean;path?:string}>;
+      importContinuation: () => Promise<{cancelled?:boolean;plan?:ContinuationPlan}>;
+      pendingContinuations: () => Promise<Array<{token:string;phase:string;backup:string}>>;
+      previewContinuation: (token:string) => Promise<ContinuationPlan>;
+      acceptContinuation: (input:{token:string;expected:string;choice:'incoming'|'keep-local';localFlow:import('./lib/continuation-flow').CarriedFlow}) => Promise<{ok:boolean;changed:boolean;cwd?:string;sessionId?:string;backup?:string;flow?:import('./lib/continuation-flow').CarriedFlow}>;
+      rollbackContinuation: (token:string) => Promise<{ok:boolean;cwd:string;sessionId:string;backup:string}>;
+      exportApplicationCandidate: () => Promise<{ok?:boolean;cancelled?:boolean;path?:string}>;
       getInfo: () => Promise<AppInfo>;
       pickProject: () => Promise<string | null>;
       addRecentProject?: (
@@ -964,3 +976,5 @@ export type DeliveryState = {sessionId: string; cwd: string; revision: number; p
 export type DeliveryEvent = {type: string; sessionId: string; cwd?: string; state?: DeliveryState; row?: DeliveryRow; method?: "prompt" | "interject"; ok?: boolean; cancelled?: boolean; error?: string};
 
 export type WorkingKnowledgeTransferPlan = {token:string;objectId:string;title:string;localTitle:string|null;sourceMachine:string;kind:'new'|'equal'|'local-ahead'|'incoming-ahead'|'conflict';localHead:string|null;incomingHead:string;changes:Array<{id:string;local:WorkingKnowledgeItem|null;incoming:WorkingKnowledgeItem|null}>;localPending:number;incomingPending:number;exportedAt:string};
+
+export type ContinuationPlan={token:string;cwd:string;sessionId:string;title:string;sourceCwd:string;nativeFiles:number;materialFiles:string[];nativeConflict:boolean;conflicts:string[];hasDraft:boolean;pendingSends:number;expected:string;version:unknown};

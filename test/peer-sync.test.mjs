@@ -62,7 +62,7 @@ total size is 9
   assert.deepEqual(files, ["sessions/abc/summary.json", "memory/MEMORY.md"]);
 });
 
-test("alignment preview is chinese and newer-wins", () => {
+test("legacy alignment summary no longer promises timestamp overwrite", () => {
   assert.equal(
     alignmentPreviewText({ pull: [], push: [] }),
     "两边已经一样，不用动。",
@@ -70,7 +70,7 @@ test("alignment preview is chinese and newer-wins", () => {
   const t = alignmentPreviewText({ pull: ["a"], push: ["b", "c"] });
   assert.match(t, /拿来 1/);
   assert.match(t, /送过去 2/);
-  assert.match(t, /新的会盖掉旧的/);
+  assert.match(t, /冲突需明确选择/);
   const s = summarizeFileList(["a", "b", "c"], 2);
   assert.equal(s.count, 3);
   assert.equal(s.more, 1);

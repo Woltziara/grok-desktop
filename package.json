@@ -12,7 +12,7 @@
   },
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "build": "vite build",
+    "build": "vite build && node scripts/write-build-identity.mjs",
     "start": "electron .",
     "preview": "npm run build && electron .",
     "pack": "npm run check && npm run build && electron-builder --dir",
@@ -27,7 +27,8 @@
     "test:preview": "node scripts/test-preview.mjs",
     "test:sidebar": "node scripts/test-sidebar.mjs",
     "test:delivery": "node scripts/test-delivery.mjs",
-    "test:knowledge-transfer": "node scripts/test-knowledge-transfer.mjs"
+    "test:knowledge-transfer": "node scripts/test-knowledge-transfer.mjs",
+    "test:continuation": "node scripts/test-continuation.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

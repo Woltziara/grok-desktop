@@ -1,3 +1,4 @@
+import { assertContinuationSettled } from './continuation-pack.mjs';
 import { registerKnowledgeTransferIpc } from "./knowledge-transfer-ipc.mjs";
 import { createSessionDelivery } from "./session-delivery.mjs";
 import { registerDeliveryIpc } from "./delivery-ipc.mjs";
@@ -104,14 +105,9 @@ import {
   listAccountSnapshots,
   saveCurrentSnapshot,
 } from "./account-auth.mjs";
-import {
-  alignPeer,
-  copyAppToPeer,
-  copyAuthToPeer,
-  pairPeer,
-  peerAccountSummary,
-  peerStatus,
-} from "./peer-sync.mjs";
+import { exportApplicationCandidate } from "./peer-sync.mjs";
+import { readBuildIdentity } from "./build-identity.mjs";
+import { registerContinuationIpc } from "./continuation-ipc.mjs";
 import { remainingFromBilling } from "../shared/billing-display.mjs";
 import {
   exportFilename,
@@ -863,6 +859,23 @@ function delivery() {
 function registerIpc() {
   registerKnowledgeTransferIpc(ipcMain, {dialog, windowFromEvent: e => BrowserWindow.fromWebContents(e.sender)});
   registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
+  registerContinuationIpc(ipcMain, {
+    home:grokHomeDir, userData:()=>app.getPath("userData"), dialog,
+    windowFromEvent:e=>BrowserWindow.fromWebContents(e.sender),
+    identity:()=>readBuildIdentity(app.getAppPath(),app.getVersion()),
+    remember:rememberProjectSession,
+    assertIdle:async (id,replacing)=>{
+      if (sessionDelivery?.isActive(id)) throw new Error("该对话仍在发送，请先等本轮完成或停止。");
+      for (const ws of windowSessions.values()) {
+        if (replacing && (ws.agent?.sessionId===id || (!ws.agent&&ws.lastSessionId===id))) throw new Error("请先离开正在显示的同一段对话，再接入资料；避免覆盖正在编辑的草稿。");
+        for (const client of new Set([ws.agent,...ws.parkedAgents.values()])) if (client?.sessionId===id) {
+          if(client.turnOpen||client._activeTurn||client._openPermissionGates?.size||client._restartPromise) throw new Error("该对话仍在工作或等待答复，请先完成本轮。");
+          if (replacing) { await client.dispose(); ws.parkedAgents.delete(id); }
+        }
+      }
+      if (!replacing && sessionDelivery) sessionDelivery.mutate(id,"pause");
+    },
+  });
   ipcMain.on("window:ready", (e) => {
     const reveal = revealByWebContents.get(e.sender);
     if (typeof reveal === "function") reveal();
@@ -876,6 +889,7 @@ function registerIpc() {
     const codingData = ensureCodingDataDefaultOptIn();
     return {
       version: app.getVersion(),
+      buildIdentity: readBuildIdentity(app.getAppPath(), app.getVersion()),
       pid: process.pid,
       executable: process.execPath,
       appPath: app.getAppPath(),
@@ -1413,6 +1427,7 @@ function registerIpc() {
   });
 
   ipcMain.handle("sessions:open", async (e, { cwd, sessionId, mode }) => {
+    assertContinuationSettled(app.getPath("userData"),sessionId);
     const ws = sessionFromEvent(e);
     if (!ws) throw new Error("No window for sessions:open");
     if (!cwd || !fs.existsSync(cwd)) {
@@ -1807,27 +1822,15 @@ function registerIpc() {
     return armWorkingKnowledgeProbe();
   });
 
-  ipcMain.handle("peer:status", async () => {
-    const state = loadState();
-    const status = await peerStatus(app.getPath("userData"));
-    return { ...status, lastSyncAt: state.lastPeerSyncAt || null };
-  });
-
-  ipcMain.handle("peer:pair", async (_e, password) => {
-    return pairPeer(app.getPath("userData"), String(password || ""));
-  });
-
-  ipcMain.handle("peer:align", async (_e, opts = {}) => {
-    const result = await alignPeer(app.getPath("userData"), {
-      apply: Boolean(opts.apply),
-    });
-    if (result.ok && result.applied) {
-      const state = loadState();
-      state.lastPeerSyncAt = new Date().toISOString();
-      saveState(state);
-      result.lastSyncAt = state.lastPeerSyncAt;
-    }
-    return result;
+  // Old callers fail visibly without touching remote credentials or applying mtime copies.
+  for (const channel of ["peer:status", "peer:pair", "peer:align", "peer:copy-auth", "peer:copy-app"]) {
+    ipcMain.handle(channel, () => ({ok:false,error:"旧的整机覆盖/登录搬运已停用，请使用会话和工作认识的显式接续入口。"}));
+  }
+  ipcMain.handle("peer:export-candidate", async e => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const picked = await dialog.showSaveDialog(win, {title:"导出当前候选版本到新目录",defaultPath:`Grok-Desktop-${app.getVersion()}-candidate`});
+    if (picked.canceled) return {cancelled:true};
+    return exportApplicationCandidate({appPath:app.getAppPath(),execPath:process.execPath,version:app.getVersion(),isPackaged:app.isPackaged,destination:picked.filePath});
   });
 
   function broadcastAuthChanged() {
@@ -1846,8 +1849,7 @@ function registerIpc() {
   ipcMain.handle("account:list", async () => {
     saveCurrentSnapshot();
     const local = listAccountSnapshots();
-    const peer = await peerAccountSummary(app.getPath("userData"));
-    return { ...local, peer };
+    return local;
   });
 
   ipcMain.handle("account:activate", async (_e, id) => {
@@ -1856,21 +1858,6 @@ function registerIpc() {
       result.status = broadcastAuthChanged();
     }
     return result;
-  });
-
-  ipcMain.handle("peer:copy-auth", async (_e, direction) => {
-    const dir = direction === "pull" ? "pull" : "push";
-    const result = await copyAuthToPeer(app.getPath("userData"), dir);
-    if (result.ok && dir === "pull") {
-      result.status = broadcastAuthChanged();
-    }
-    return result;
-  });
-
-  ipcMain.handle("peer:copy-app", async () => {
-    return copyAppToPeer(app.getPath("userData"), {
-      execPath: process.execPath,
-    });
   });
 
   ipcMain.handle("agent:billing", async (e) => {

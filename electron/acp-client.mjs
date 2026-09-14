@@ -1,3 +1,4 @@
+import { continuationRules } from './continuation-rules.mjs';
 import { assertSessionNotMoving } from "./session-move.mjs";
 /**
  * Minimal ACP (Agent Client Protocol) client over `grok agent stdio`.
@@ -502,10 +503,10 @@ export class GrokAcpClient extends EventEmitter {
    * Meta passed on session/new and session/load so the agent starts in the
    * same permission mode the Desktop UI shows (grok-build yoloMode + autoMode).
    */
-  _sessionPermissionMeta() {
+  _sessionPermissionMeta(sessionId = this.sessionId) {
     return {
       ...sessionPermissionMeta(this.permissionMode || "ask"),
-      rules: PREVIEW_SESSION_RULE,
+      rules: PREVIEW_SESSION_RULE + continuationRules(this.cwd, sessionId),
     };
   }
 
@@ -658,7 +659,7 @@ export class GrokAcpClient extends EventEmitter {
         sessionId,
         cwd: this.cwd,
         mcpServers: this._previewMcpPayload(),
-        _meta: { ...this._sessionPermissionMeta(), "x.ai/restore_code": false },
+        _meta: { ...this._sessionPermissionMeta(sessionId), "x.ai/restore_code": false },
       },
       { timeoutMs: LOAD_TIMEOUT_MS },
     );

@@ -1,0 +1,2 @@
+import fs from 'node:fs';import path from 'node:path';
+export function readBuildIdentity(appPath,version){try{const info=JSON.parse(fs.readFileSync(path.join(appPath,'dist/build-identity.json'),'utf8'));if(info.schema!==1||info.version!==version||!/^[a-f0-9]{64}$/.test(info.sourceDigest)||info.sourceCommit!==null&&!/^[a-f0-9]{40}$/.test(info.sourceCommit))throw Error();return info;}catch{return {schema:1,version,sourceCommit:null,sourceDigest:null,dirty:null,unverified:true};}}

@@ -3,6 +3,17 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("grokDesktop", {
   /** First React paint — main may now show the shell and drop the native splash. */
   windowReady: () => ipcRenderer.send("window:ready"),
+  continuationResult: token => ipcRenderer.invoke("continuation:result",token),
+  acknowledgeContinuationFlow: token => ipcRenderer.invoke("continuation:flow-applied",token),
+  listContinuations: () => ipcRenderer.invoke("continuation:list"),
+  selectContinuationMaterials: cwd => ipcRenderer.invoke("continuation:select-materials",cwd),
+  exportContinuation: input => ipcRenderer.invoke("continuation:export",input),
+  importContinuation: () => ipcRenderer.invoke("continuation:import"),
+  pendingContinuations: () => ipcRenderer.invoke("continuation:pending"),
+  previewContinuation: token => ipcRenderer.invoke("continuation:preview",token),
+  acceptContinuation: input => ipcRenderer.invoke("continuation:accept",input),
+  rollbackContinuation: token => ipcRenderer.invoke("continuation:rollback",token),
+  exportApplicationCandidate: () => ipcRenderer.invoke("peer:export-candidate"),
   getInfo: () => ipcRenderer.invoke("app:get-info"),
   pickProject: () => ipcRenderer.invoke("project:pick"),
   addRecentProject: (cwd) => ipcRenderer.invoke("project:add-recent", cwd),
