@@ -56,11 +56,42 @@ test("an existing on-disk config object is preserved", () => {
 
 test("changing a software directory does not replace an existing object binding", () => {
   const root = tmpRoot();
-  writeConfig(root, { currentObjectId: "alpha" });
-  assert.equal(resolveBoundObject(root, { sessionId: "sess-a", cwd: "/tmp/one", inherit: true }).objectId, "alpha");
+  bindSession(root, { sessionId: "sess-a", objectId: "alpha", cwd: "/tmp/one", source: "user" });
   writeConfig(root, { currentObjectId: "beta" });
-  assert.equal(resolveBoundObject(root, { sessionId: "sess-a", cwd: "/tmp/two", inherit: true }).objectId, "alpha");
-  assert.equal(resolveBoundObject(root, { sessionId: "sess-b", cwd: "/tmp/two", inherit: true }).objectId, "beta");
+  assert.equal(resolveBoundObject(root, { sessionId: "sess-a", cwd: "/tmp/two" }).objectId, "alpha");
+  assert.equal(resolveBoundObject(root, { sessionId: "sess-b", cwd: "/tmp/two" }).objectId, "");
+});
+
+test("an unbound session does not inherit the global default object", async () => {
+  const root = tmpRoot();
+  writeConfig(root, { currentObjectId: "beta" });
+  assert.equal(resolveBoundObject(root, { sessionId: "sess-b" }).objectId, "");
+  process.env.GROK_DESKTOP_WK_ROOT = root;
+  const { snapshotWorkingKnowledge, wrapOutgoingPrompt, setWorkingKnowledgeObject } = await import("../electron/working-knowledge.mjs");
+  setWorkingKnowledgeObject({ objectId: "alpha", sessionId: "sess-a", cwd: "/tmp/a" });
+  assert.equal(readConfig(root).currentObjectId, "beta");
+  assert.equal(snapshotWorkingKnowledge({ sessionId: "sess-a" }).activeObjectId, "alpha");
+  assert.equal(snapshotWorkingKnowledge({ sessionId: "sess-b" }).activeObjectId, "");
+  const wrapped = wrapOutgoingPrompt({ text: "你好", sessionId: "sess-b", cwd: "/tmp/b", origin: "user" });
+  assert.equal(wrapped.objectId, "");
+  assert.equal(wrapped.wireText, "你好");
+});
+
+test("legacy inherit-current bindings stop injecting and leave object materials", async () => {
+  const root = tmpRoot();
+  writeConfig(root, { currentObjectId: "alpha" });
+  bindSession(root, { sessionId: "old-auto", objectId: "alpha", cwd: "/tmp/one", source: "inherit-current" });
+  process.env.GROK_DESKTOP_WK_ROOT = root;
+  const { snapshotWorkingKnowledge, wrapOutgoingPrompt } = await import("../electron/working-knowledge.mjs");
+  assert.equal(snapshotWorkingKnowledge({ sessionId: "old-auto" }).activeObjectId, "");
+  const wrapped = wrapOutgoingPrompt({ text: "普通问题", sessionId: "old-auto", cwd: "/tmp/one", origin: "user" });
+  assert.equal(wrapped.objectId, "");
+  assert.equal(wrapped.wireText, "普通问题");
+  assert.equal(resolveBoundObject(root, { sessionId: "old-auto" }).objectId, "");
+  const bindings = JSON.parse(fs.readFileSync(path.join(root, "bindings.json"), "utf8"));
+  assert.equal(Object.prototype.hasOwnProperty.call(bindings, "old-auto"), false);
+  assert.equal(readCurrent(root, "alpha").items.length >= 0, true);
+  assert.ok(fs.existsSync(path.join(root, "objects", "alpha", "current.json")));
 });
 
 test("an explicit empty session binding does not fall back to a selected object", async () => {
@@ -251,6 +282,6 @@ test("a user-armed probe is one-use and only injects after explicit arming", asy
   assert.ok(wrapped.probeToken);
   assert.equal(original.includes(wrapped.probeToken), false);
   assert.match(wrapped.wireText, new RegExp(`PROBE_TOKEN=${wrapped.probeToken}`));
-  assert.match(wrapped.wireText, /Alpha 的约束只适用于 Alpha/);
+  assert.doesNotMatch(wrapped.wireText, /Alpha 的约束只适用于 Alpha/);
   assert.equal(wrapOutgoingPrompt({ text: original, sessionId: "s-probe", cwd: "/tmp/unrelated", origin: "user" }).probeToken, null);
 });

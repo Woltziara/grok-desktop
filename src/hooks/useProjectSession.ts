@@ -26,6 +26,7 @@ import type { SlashCommand } from "../lib/commands";
 export function useProjectSession(opts: {
   auth: AuthStatus | null;
   project: string | null;
+  sessionId?: string | null;
   busyRef: MutableRefObject<boolean>;
   openingRef: MutableRefObject<boolean>;
   /** Cleared on open — typed loosely so App can pass its queue refs. */
@@ -89,6 +90,7 @@ export function useProjectSession(opts: {
   const {
     auth,
     project,
+    sessionId: currentSessionId,
     busyRef,
     openingRef,
     promptQueueRef,
@@ -147,6 +149,17 @@ export function useProjectSession(opts: {
       openOpts?: { note?: string; openGen?: number },
     ) => {
       bindOpeningSession(res.sessionId, res.historySeq);
+      await revokeWritesThisSession();
+      void syncParkedRequestsFromMain();
+      await syncPermissionsFromMain();
+      const history = pickResumeTimeline(
+        res.history || [],
+        takeCachedTimeline?.(res.sessionId),
+        Boolean(res.turnOpen),
+      ) as TimelineItem[];
+      const bb = res.backbone ?? (await refreshBackbone(res.cwd));
+      const i = await window.grokDesktop.getInfo();
+
       setProject(res.cwd);
       setSessionId(res.sessionId);
       setSessions(res.sessions || []);
@@ -154,28 +167,16 @@ export function useProjectSession(opts: {
       setModelName(res.modelName || null);
       setAvailableModels(res.availableModels || []);
       clearSessionScoped();
-      await revokeWritesThisSession();
-      // While openingRef is true, live usage is ignored — disk replace is safe.
       hydrateBackgroundTasks(res.backgroundTasks || []);
       hydrateScheduledTasks?.(res.scheduledTasks || []);
       hydrateSessionUsage(res.usage);
       hydrateSessionMode(res.sessionMode ?? null);
-      void syncParkedRequestsFromMain();
-      // Await so we do not mark online with a stale empty mirror.
-      await syncPermissionsFromMain();
       setAgentCommands([]);
-      // Composer draft/slash menu remounts via key=sessionId — no reset needed.
       clearPromptQueue();
       promptQueueRef.current = [];
       sendNowRef.current = null;
-
-      const history = pickResumeTimeline(
-        res.history || [],
-        takeCachedTimeline?.(res.sessionId),
-        Boolean(res.turnOpen),
-      ) as TimelineItem[];
       if (res.backbone) setBackbone(res.backbone);
-      const bb = res.backbone ?? (await refreshBackbone(res.cwd));
+      else setBackbone(bb);
       const skillN = bb.ok ? bb.skills.length : "?";
       const mcpN = bb.ok ? bb.mcpServers.length : "?";
       const pluginN = bb.ok ? bb.plugins.length : "?";
@@ -222,8 +223,6 @@ export function useProjectSession(opts: {
       }
       setOpeningLabel(null);
       setError(res.warning || null);
-
-      const i = await window.grokDesktop.getInfo();
       setInfo(i);
       setAuth(i.auth);
       hydrateFromInfo(i);
@@ -365,17 +364,18 @@ export function useProjectSession(opts: {
 
       openingRef.current = true;
       const openGen = beginOpening(sessionOpts.sessionId || null);
+      const prevConn = busyRef.current ? "busy" : project ? "online" : "idle";
       setConn("connecting");
       setOpeningLabel(sessionOpts.mode === "new" ? "New chat" : "Resuming…");
       setError(null);
-      setItems([]);
-      clearSessionScoped();
       try {
         const res = await window.grokDesktop.openSession({
           cwd: sessionOpts.cwd || project!,
           sessionId: sessionOpts.sessionId,
           mode: sessionOpts.mode || "resume",
         });
+        setItems([]);
+        clearSessionScoped();
         await applyOpenResult(res, {
           openGen,
           note:
@@ -391,7 +391,11 @@ export function useProjectSession(opts: {
           await onMissingBinary?.();
           setError(msg);
         } else {
-          setConn("error");
+          setSessionId(currentSessionId || null);
+          if (project) setProject(project);
+          const cached = takeCachedTimeline?.(currentSessionId);
+          if (cached?.length) setItems(cached);
+          setConn(prevConn);
           setError(msg);
         }
         abortOpening(openGen);
@@ -408,7 +412,9 @@ export function useProjectSession(opts: {
       finishOpening,
       busyRef,
       clearSessionScoped,
+      currentSessionId,
       stashLiveTimeline,
+      takeCachedTimeline,
       onMissingBinary,
       openingRef,
       project,
@@ -417,6 +423,8 @@ export function useProjectSession(opts: {
       setError,
       setItems,
       setOpeningLabel,
+      setProject,
+      setSessionId,
     ],
   );
 

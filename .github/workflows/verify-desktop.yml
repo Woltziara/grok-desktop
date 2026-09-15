@@ -39,6 +39,8 @@ jobs:
           set -o pipefail
           npm run check 2>&1 | tee evidence/check.log
           npm run build 2>&1 | tee evidence/build.log
+      # This job is Linux source verification. It does not pack macOS, start a
+      # real Grok account, or run Preview/delivery Electron smokes.
       - name: Verify Linux packaging, never publish
         run: npx electron-builder --linux --dir --publish never
       - name: Export dependency archive for offline reproducible verification

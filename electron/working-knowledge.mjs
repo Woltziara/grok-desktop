@@ -48,9 +48,9 @@ export function snapshotWorkingKnowledge({ sessionId, cwd } = {}) {
   const root = ensureReady();
   const cfg = readConfig(root);
   const bound = sessionBinding(root, sessionId);
-  // An empty session binding is an explicit user choice. Do not fall back to
-  // the global selection merely because an empty string is falsy.
-  const objectId = bound ? bound.objectId : cfg.currentObjectId || "";
+  // An empty session binding is an explicit user choice. A missing binding is
+  // also unassigned: do not inherit the global default into this conversation.
+  const objectId = bound ? bound.objectId : "";
   const current = objectId ? readCurrent(root, objectId) : { version: 0, items: [] };
   const inbox = objectId ? listInbox(root, objectId, "pending") : [];
   const receipt = lastReceipt(root);
@@ -88,7 +88,6 @@ export function setWorkingKnowledgeObject({ objectId, sessionId, cwd }) {
   if (id && !isSafeObjectId(id)) {
     throw new Error(`Unknown object: ${id}`);
   }
-  writeConfig(root, { currentObjectId: id });
   if (sessionId) {
     bindSession(root, {
       sessionId,
@@ -96,6 +95,8 @@ export function setWorkingKnowledgeObject({ objectId, sessionId, cwd }) {
       cwd,
       source: "user",
     });
+  } else {
+    writeConfig(root, { currentObjectId: id });
   }
   return snapshotWorkingKnowledge({ sessionId, cwd });
 }
@@ -133,6 +134,7 @@ export function wrapOutgoingPrompt({
   sessionId,
   cwd,
   origin = "user",
+  inboxId: existingInboxId,
 }) {
   const original = String(text || "");
   const root = ensureReady();
@@ -159,7 +161,7 @@ export function wrapOutgoingPrompt({
     ? resolveBoundObject(root, {
         sessionId,
         cwd,
-        inherit: Boolean(userTurn && cfg.enabled),
+        inherit: false,
       })
     : { objectId: "", enabled: false, source: "disabled", cwd };
 
@@ -181,6 +183,7 @@ export function wrapOutgoingPrompt({
   let inboxId = null;
   if (cfg.enabled && userTurn && objectId && original.trim() && !probeToken) {
     const row = appendInbox(root, {
+      id: existingInboxId || undefined,
       objectId,
       text: original,
       sessionId,
@@ -235,12 +238,13 @@ export function wrapOutgoingPrompt({
 }
 
 /** Capture the original once without wrapping/consuming a second ACP turn. */
-export function captureWorkingKnowledgeInterjection({ text, interjectionId, turn }) {
+export function captureWorkingKnowledgeInterjection({ text, interjectionId, turn, deliveryId }) {
   if (!turn?.objectId || !String(text || "").trim()) return null;
   const root = ensureReady();
+  const stable = String(deliveryId || "").trim();
   const key = crypto.createHash("sha256").update(`${turn.sessionId}\0${interjectionId}`).digest("hex");
   return appendInbox(root, {
-    id: `interjection_${key}`, objectId: turn.objectId, text: String(text),
+    id: stable || `interjection_${key}`, objectId: turn.objectId, text: String(text),
     sessionId: turn.sessionId, cwd: turn.cwd, source: "user",
     delivery: "interjection", turnId: turn.id, interjectionId,
   });
@@ -272,7 +276,7 @@ export function consumeTurnOutput({
   }
   // objectId can deliberately be "" for an unbound turn. Likewise, an
   // existing empty session binding must win over the global selection.
-  const oid = objectId ?? (bound ? bound.objectId : cfg.currentObjectId || "");
+  const oid = objectId ?? (bound ? bound.objectId : "");
   if (!oid) {
     return { ok: true, skipped: true, reason: "unbound" };
   }

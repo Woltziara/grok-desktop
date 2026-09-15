@@ -21,7 +21,7 @@ export function sanitizeDiagnostic(value, seen = new WeakSet()) {
     ? value.map((item) => sanitizeDiagnostic(item, seen))
     : Object.fromEntries(Object.entries(value).map(([key, item]) => [
       key,
-      /^(?:authorization|proxy-authorization|cookies?|set-cookie|password|passphrase|secret|(?:access[_-]?|refresh[_-]?|id[_-]?)?token|api[_-]?key)$/i.test(key)
+      /^(?:authorization|proxy-authorization|cookies?|set-cookie|password|passphrase|secret|client[_-]?secret|(?:access[_-]?|refresh[_-]?|id[_-]?)?token|api[_-]?key)$/i.test(key)
         ? "[redacted]"
         : sanitizeDiagnostic(item, seen),
     ]));

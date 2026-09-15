@@ -48,6 +48,27 @@ test('accepted interjection reaches the actual prompt source set once, by id rat
   assert.equal(listInbox(dir,'alpha').some(x=>x.id===inputs[1].id),false);
 });
 
+test('unsupported interject then prompt reuses the same working-knowledge inbox id', async () => {
+  const dir = root(), done = defer();
+  const c = client(async (method) => {
+    if (method === 'session/prompt') return done.promise;
+    const err = new Error('Method not found');
+    err.code = -32601;
+    throw err;
+  });
+  const running = c.prompt('开始');
+  const result = await c.interject('同一句原话', { interjectionId: 'att-1', deliveryId: 'send-1' });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'unsupported');
+  assert.equal(listInbox(dir, 'alpha').filter((row) => row.id === 'send-1').length, 1);
+  const wrapped = wrapOutgoingPrompt({ text: '同一句原话', sessionId: 's1', cwd: '/synthetic', inboxId: 'send-1' });
+  assert.equal(wrapped.inboxId, 'send-1');
+  assert.equal(listInbox(dir, 'alpha').filter((row) => row.text === '同一句原话').length, 1);
+  assert.equal(listInbox(dir, 'alpha').filter((row) => row.id === 'send-1').length, 1);
+  done.resolve({});
+  await running;
+});
+
 test('failed interjection preserves original pending without licensing it as a current-turn source', async () => {
   const dir=root(),done=defer();const c=client(async method=>{if(method==='session/prompt')return done.promise;throw new Error('transport broke');});
   const running=c.prompt('开始');await assert.rejects(c.interject('先不要报价',{interjectionId:'failed'}),/transport broke/);

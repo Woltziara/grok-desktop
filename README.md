@@ -8,7 +8,7 @@ Grok Desktop 是面向日常工作的对话桌面：左边放项目和最近对�
 
 - 源码：当前仓库根目录，分支 `main`。
 - 已安装应用：macOS 的 `/Applications/Grok Desktop.app`。
-- 开发基线：`1.4.2-unified.1`。保留本地对话界面，吸收上游 1.4.2 的协议与稳定性修复。
+- 开发基线：`1.4.2-unified.2`。保留本地对话界面，吸收上游 1.4.2 的协议与稳定性修复。
 - 旧源码副本和旧开发历史已退出开发路径。恢复归档是恢复点，不是另一套开发版。
 - GitHub 源码与 Releases 安装包分开更新；下载前核对 Release 的版本，旧 Release 不代表当前主线。
 
@@ -28,7 +28,7 @@ Grok Desktop 是面向日常工作的对话桌面：左边放项目和最近对�
 
 ## 本地构建
 
-需要 Node.js 22+、npm，以及本机已安装并登录的 [Grok Build](https://docs.x.ai/build/overview)。
+需要 Node.js 22.12+、npm，以及本机已安装并登录的 [Grok Build](https://docs.x.ai/build/overview)。应用运行在 Electron 44 上。
 
 ```sh
 npm ci

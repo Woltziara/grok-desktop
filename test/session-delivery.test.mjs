@@ -82,6 +82,15 @@ test('interject uses one native path and real errors never quietly become queued
   assert.equal(service.state('session-A').items.find(i=>i.id==='correction').status,'uncertain');assert.ok(events.some(e=>e.type==='started'&&e.method==='interject'));
 });
 
+test('interject fallback and prompt keep the stable outbox id',async t=>{
+  const {service}=fixture(t),a=new Peer('session-A');a.interjectResult={ok:false,reason:'unsupported'};
+  service.submit(a,input('first'));await tick();service.submit(a,input('later','later-id'));await tick();
+  assert.equal(a.interjections[0].opts.deliveryId,'later-id');
+  a.complete();await waitFor(()=>a.calls.length===2);
+  assert.equal(a.calls[1].opts.deliveryId,'later-id');
+  a.complete();await tick();
+});
+
 test('unsupported interject alone falls back to FIFO and a cancelled turn does not reset another owner',async t=>{
   const {service}=fixture(t),a=new Peer('session-A');a.interjectResult={ok:false,reason:'unsupported'};
   service.submit(a,input('first'));await tick();service.submit(a,input('later'));await tick();assert.equal(service.state('session-A').items.find(i=>i.id==='later').status,'queued');

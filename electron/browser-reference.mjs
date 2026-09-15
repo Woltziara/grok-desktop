@@ -1,24 +1,11 @@
 import crypto from "node:crypto";
+import { previewIdentityHref, safePreviewLabel } from "../shared/preview-url.mjs";
 
 export const BROWSER_REFERENCE_KIND = "owned-preview";
+export { safePreviewLabel };
 
 function pageId(url) {
-  return crypto.createHash("sha256").update(String(url || "")).digest("hex");
-}
-
-export function safePreviewLabel(rawUrl) {
-  try {
-    const url = new URL(String(rawUrl || ""));
-    if (url.protocol !== "http:" && url.protocol !== "https:") return "浏览器页面";
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    const path = url.pathname.length > 160 ? `${url.pathname.slice(0, 157)}…` : url.pathname;
-    return `${url.origin}${path === "/" ? "" : path}`;
-  } catch {
-    return "浏览器页面";
-  }
+  return crypto.createHash("sha256").update(previewIdentityHref(url) || String(url || "")).digest("hex");
 }
 
 export function captureBrowserReference(state, sessionId) {

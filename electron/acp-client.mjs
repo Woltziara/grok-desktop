@@ -1703,7 +1703,7 @@ export class GrokAcpClient extends EventEmitter {
    *   interjectionId?: string,
    * }} [opts]
    */
-  async interject(text, { images = [], imageQuality = "compact", interjectionId, browserReference } = {}) {
+  async interject(text, { images = [], imageQuality = "compact", interjectionId, browserReference, deliveryId } = {}) {
     if (!this.sessionId) throw new Error("No ACP session");
     const turn = this._activeTurn;
     if (!this.turnOpen || !turn || turn.cancelled || turn.finishing) {
@@ -1719,7 +1719,7 @@ export class GrokAcpClient extends EventEmitter {
     }
     // Durably record before calling ACP. Failure/cancel leaves the original pending.
     const capture = this._promptLifecycle.captureInterjection || captureWorkingKnowledgeInterjection;
-    const row = capture({ text: String(text || ""), interjectionId: id, turn });
+    const row = capture({ text: String(text || ""), interjectionId: id, turn, deliveryId });
     const promise = this._sendInterjection(text, { images, imageQuality, interjectionId: id, browserReference }).then((result) => {
       if (result?.ok && !turn.cancelled && row?.id && !turn.inboxIds.includes(row.id)) turn.inboxIds.push(row.id);
       return result;
@@ -1826,14 +1826,20 @@ export class GrokAcpClient extends EventEmitter {
     return this._restartPromise;
   }
 
-  async prompt(text, { images = [], imageQuality = "compact", origin = "user", browserReference } = {}) {
+  async prompt(text, { images = [], imageQuality = "compact", origin = "user", browserReference, deliveryId } = {}) {
     if (this._needsPromptRestart) await this._resumeAfterCancellation();
     if (!this.sessionId) throw new Error("No ACP session");
     assertSessionNotMoving(this.sessionId);
     if (this.turnOpen) throw new Error("A turn is already running; use interject or queue");
     const sessionId = this.sessionId;
     const cwd = this.cwd;
-    const prepared = this._promptLifecycle.prepare({ text, sessionId, cwd, origin });
+    const prepared = this._promptLifecycle.prepare({
+      text,
+      sessionId,
+      cwd,
+      origin,
+      ...(deliveryId ? { inboxId: deliveryId } : {}),
+    });
     const { wrapped, prompt } = prepared;
     const machine = browserReferenceMachineText(browserReference);
     if (machine) prompt.push({ type: "text", text: machine });

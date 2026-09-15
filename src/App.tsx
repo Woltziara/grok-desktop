@@ -43,6 +43,7 @@ import {
 } from "./lib/desktop-commands";
 import { isMissingBinaryError, type ConnState } from "./lib/conn";
 import { classifyErrorAction } from "../shared/error-actions.mjs";
+import { isRedundantSessionResume } from "../shared/session-open-policy.mjs";
 import { parkedUpdateNotice } from "../shared/parked-notice.mjs";
 import { folderDisplayName } from "../shared/sidebar-chats.mjs";
 import {
@@ -433,6 +434,7 @@ export default function App() {
     useProjectSession({
       auth,
       project,
+      sessionId,
       busyRef,
       openingRef,
       promptQueueRef,
@@ -1890,9 +1892,13 @@ export default function App() {
             onOpenSession={(opts) => {
               if (
                 opts.mode === "resume" &&
-                opts.sessionId &&
-                opts.sessionId === sessionId &&
-                (!opts.cwd || samePathKey(opts.cwd, project))
+                isRedundantSessionResume({
+                  currentSessionId: sessionId,
+                  requestedSessionId: opts.sessionId,
+                  sameProject: !opts.cwd || samePathKey(opts.cwd, project),
+                  conn,
+                  hasVisibleTimeline: items.length > 0,
+                })
               ) {
                 return;
               }

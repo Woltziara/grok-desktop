@@ -200,10 +200,27 @@ export function bindSession(root, { sessionId, objectId, cwd, source }) {
   return all[sid];
 }
 
+export function dropInheritedBinding(root, sessionId) {
+  const sid = String(sessionId || "").trim();
+  if (!sid) return false;
+  const all = readBindings(root);
+  const row = all[sid];
+  if (!row || row.source !== "inherit-current") return false;
+  delete all[sid];
+  atomicWrite(bindingsPath(root), `${JSON.stringify(all, null, 2)}\n`);
+  return true;
+}
+
 export function sessionBinding(root, sessionId) {
   const sid = String(sessionId || "").trim();
   if (!sid) return null;
-  return readBindings(root)[sid] || null;
+  const row = readBindings(root)[sid] || null;
+  if (!row) return null;
+  if (row.source === "inherit-current") {
+    dropInheritedBinding(root, sid);
+    return null;
+  }
+  return row;
 }
 
 export function ensureObject(root, objectId, meta = {}) {
@@ -468,7 +485,7 @@ export function nonCoreItems(items) {
   return (items || []).filter((it) => !core.has(it));
 }
 
-export function resolveBoundObject(root, { sessionId, cwd, inherit = true }) {
+export function resolveBoundObject(root, { sessionId, cwd, inherit = false }) {
   const cfg = readConfig(root);
   const existing = sessionBinding(root, sessionId);
   if (existing) {
@@ -495,8 +512,8 @@ export function resolveBoundObject(root, { sessionId, cwd, inherit = true }) {
     };
   }
   return {
-    objectId: current,
-    source: "current",
+    objectId: inherit ? current : "",
+    source: inherit ? "current" : "unbound",
     cwd: cwd || "",
     enabled: cfg.enabled,
   };

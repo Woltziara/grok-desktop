@@ -696,7 +696,7 @@ function installApplicationMenu() {
           label: "Open Releases page",
           click: () => {
             void shell.openExternal(
-              "https://github.com/liaan/grok-desktop/releases",
+              "https://github.com/Woltziara/grok-desktop/releases",
             );
           },
         },
@@ -705,7 +705,7 @@ function installApplicationMenu() {
           label: "Install guide (Mac “damaged” fix)",
           click: () => {
             shell.openExternal(
-              "https://github.com/liaan/grok-desktop#mac-damaged-and-cant-be-opened",
+              "https://github.com/Woltziara/grok-desktop#本地构建",
             );
           },
         },

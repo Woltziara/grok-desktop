@@ -240,7 +240,7 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
     emit(id, 'started', row, { method: 'interject' });
     try {
       const browserReference = validateBrowserReference(row.browserReference, client);
-      const result = await client.interject(row.text, { images: row.images, imageQuality: row.imageQuality, interjectionId: row.attemptId, browserReference });
+      const result = await client.interject(row.text, { images: row.images, imageQuality: row.imageQuality, interjectionId: row.attemptId, deliveryId: row.id, browserReference });
       const follow = interjectFollowUp(result);
       if (follow === 'error') throw new Error(result?.error || result?.reason || '没能插入当前回合');
       store.change(id, value => {
@@ -276,7 +276,7 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
       const browserReference = validateBrowserReference(first.browserReference, client);
       store.change(id, next => { row = next.items.find(i => i.id === first.id); row.status = 'sending'; delete row.immediate; row.startedAt = Date.now(); row.attempt++; row.attemptId = randomUUID(); delete row.error; });
       emit(id, 'started', row, { method: 'prompt' });
-      const result = await client.prompt(row.text, { images: row.images, imageQuality: row.imageQuality, origin: row.origin, browserReference });
+      const result = await client.prompt(row.text, { images: row.images, imageQuality: row.imageQuality, origin: row.origin, browserReference, deliveryId: row.id });
       if (result?.stopReason === 'cancelled' || result?.stop_reason === 'cancelled') run.cancelled = true;
       if (run.cancelled) throw new Error('cancelled');
       if (row.purpose === 'compact') {

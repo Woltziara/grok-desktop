@@ -13,6 +13,7 @@ import { encodeSessionCwd, listSessionsForCwd, loadSessionOpenState } from '../e
 import { migrateSessionFlow } from '../shared/session-flow-move.mjs';
 import { FLOW_KEY, draftStorageKey } from '../shared/flow-persist.mjs';
 import { sessionOrgKey } from '../shared/workspace-org.mjs';
+import { rollbackLiveAgent } from '../shared/parked-agent.mjs';
 const id='move-session-0001';
 function fixture(t) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'desktop-move-')),home=path.join(root,'grok');
@@ -120,4 +121,27 @@ test('a rejected native resume does not allocate an unrelated new conversation',
   const open=vm.runInNewContext('('+source.slice(start,end).replace(/^export /,'')+')',{resolveMovedSessionCwd:cwd=>cwd,ensureAgent:async(_ws,cwd,opts)=>{calls.push({cwd,...opts});throw new Error('resume failed');}});
   await assert.rejects(open({generation:1},{cwd:'/B',mode:'resume',sessionId:id}),/resume failed/);
   assert.equal(calls.length,1);assert.equal(calls[0].resumeSessionId,id);assert.equal(calls[0].forceNew,false);
+});
+
+test('a later failure after B starts restores A as the live send target',async()=> {
+  const source=fs.readFileSync(new URL('../electron/window-session.mjs',import.meta.url),'utf8');
+  const start=source.indexOf('export async function openSessionOnWindow('),end=source.indexOf('\n/**',start);
+  const agentA={sessionId:'A',cwd:'/proj',proc:{}};
+  const agentB={sessionId:'B',cwd:'/proj',proc:{},grokPath:'/g',turnOpen:false,updateSeq:1,_modelsPublic:()=>({})};
+  const remembered=[];
+  const ws={generation:1,agent:agentA,parkedAgents:new Map(),lastSessionId:'A',lastCwd:'/proj'};
+  const open=vm.runInNewContext('('+source.slice(start,end).replace(/^export /,'')+')',{
+    resolveMovedSessionCwd:cwd=>cwd,
+    ensureAgent:async(windowSession)=>{windowSession.parkedAgents.set('A',agentA);windowSession.agent=agentB;return agentB;},
+    isSessionLive:()=>true,
+    rollbackLiveAgent,
+    rememberProjectOnWindow:(windowSession,cwd,sessionId)=>{windowSession.lastCwd=cwd;windowSession.lastSessionId=sessionId;remembered.push(sessionId);},
+    setWindowTitle(){},
+    restartBackgroundTaskTail(){},
+  });
+  await assert.rejects(open(ws,{cwd:'/proj',mode:'resume',sessionId:'B',loadState(){throw new Error('history failed');}}),/history failed/);
+  assert.equal(ws.agent,agentA);
+  assert.equal(ws.lastSessionId,'A');
+  assert.equal(ws.parkedAgents.get('B'),agentB);
+  assert.ok(remembered.includes('A'));
 });

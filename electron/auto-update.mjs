@@ -12,11 +12,18 @@
  * via a detached helper script, then relaunch.
  */
 import { createRequire } from "node:module";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app, dialog, BrowserWindow } from "electron";
+import {
+  UPDATE_RELEASES_URL,
+  formatUpdateCheckError,
+  macBundleIdFromPlistXml,
+  pickMacUpdateZip,
+  updateReceiptFromDownload,
+} from "../shared/update-identity.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -27,6 +34,9 @@ let wired = false;
 let busy = false;
 /** True while we are forcing quit to install an update */
 let quittingForUpdate = false;
+/** @type {import('electron-updater').UpdateInfo | null} */
+let lastDownloadedUpdate = null;
+let suppressErrorDialog = false;
 /** Settings → Preview updates. Default off so team installers stay on stable. */
 let allowPrereleasePref = false;
 
@@ -130,46 +140,38 @@ function macAppBundlePath() {
  * @returns {string | null}
  */
 function resolveMacUpdateZip(autoUpdater) {
-  const candidates = [];
-
   try {
-    const helper = autoUpdater?.downloadedUpdateHelper;
-    if (helper?.file) candidates.push(helper.file);
-    if (helper?.cacheDir) {
-      candidates.push(path.join(helper.cacheDir, "update.zip"));
-      const pending = path.join(helper.cacheDir, "pending");
-      if (fs.existsSync(pending)) {
-        for (const name of fs.readdirSync(pending)) {
-          if (name.endsWith(".zip")) candidates.push(path.join(pending, name));
-        }
-      }
-    }
+    const file = autoUpdater?.downloadedUpdateHelper?.file;
+    if (!file || !fs.existsSync(file)) return null;
+    const receipt = updateReceiptFromDownload(lastDownloadedUpdate);
+    return pickMacUpdateZip({
+      downloadedFile: file,
+      size: fs.statSync(file).size,
+      updateVersion: receipt.version,
+      sha512Receipt: receipt.sha512Receipt,
+    });
   } catch {
-    /* ignore private field access failures */
+    return null;
   }
+}
 
-  // Known electron-updater layout (see AppAdapter.getAppCacheDir + updaterCacheDirName)
-  const cacheRoot = path.join(os.homedir(), "Library", "Caches", "grok-desktop-updater");
-  candidates.push(path.join(cacheRoot, "update.zip"));
-  const pendingDir = path.join(cacheRoot, "pending");
+function readPlistXml(appPath) {
+  const plistPath = path.join(appPath, "Contents", "Info.plist");
   try {
-    if (fs.existsSync(pendingDir)) {
-      for (const name of fs.readdirSync(pendingDir)) {
-        if (name.endsWith(".zip")) candidates.push(path.join(pendingDir, name));
-      }
-    }
+    return execFileSync("plutil", ["-convert", "xml1", "-o", "-", plistPath], {
+      encoding: "utf8",
+    });
   } catch {
-    /* ignore */
+    return fs.readFileSync(plistPath, "utf8");
   }
+}
 
-  for (const p of candidates) {
-    try {
-      if (p && fs.existsSync(p) && fs.statSync(p).size > 10_000) return p;
-    } catch {
-      /* try next */
-    }
+function currentMacBundleId(appPath) {
+  try {
+    return macBundleIdFromPlistXml(readPlistXml(appPath));
+  } catch {
+    return "";
   }
-  return null;
 }
 
 /**
@@ -183,9 +185,21 @@ function resolveMacUpdateZip(autoUpdater) {
 function startMacManualInstall(autoUpdater) {
   const zipPath = resolveMacUpdateZip(autoUpdater);
   const appPath = macAppBundlePath();
+  const expectedBundleId = currentMacBundleId(appPath);
+  const receipt = updateReceiptFromDownload(lastDownloadedUpdate);
+  const expectedVersion = receipt.version;
+  const expectedArch = receipt.arch || process.arch;
+  if (!expectedBundleId || !expectedVersion || !expectedArch) {
+    console.warn("[auto-update] mac manual install: missing identity", {
+      expectedBundleId,
+      expectedVersion,
+      expectedArch,
+    });
+    return false;
+  }
 
   if (!zipPath) {
-    console.warn("[auto-update] mac manual install: no update.zip found");
+    console.warn("[auto-update] mac manual install: no verified update.zip found");
     return false;
   }
   if (!appPath.endsWith(".app") || !fs.existsSync(appPath)) {
@@ -224,21 +238,34 @@ APP_PID="$2"
 ZIP="$3"
 DEST="$4"
 APP_NAME="$(basename "$DEST")"
+EXPECTED_BUNDLE_ID="$5"
+EXPECTED_VERSION="$6"
+EXPECTED_ARCH="$7"
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 exec >>"$LOG" 2>&1
 echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) mac update helper ===="
-echo "pid=$APP_PID zip=$ZIP dest=$DEST"
+echo "pid=$APP_PID zip=$ZIP dest=$DEST bundle=$EXPECTED_BUNDLE_ID version=$EXPECTED_VERSION arch=$EXPECTED_ARCH"
 
-# Wait for the Electron process to exit (max ~90s)
+if [ -z "$EXPECTED_BUNDLE_ID" ] || [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_ARCH" ]; then
+  echo "ERROR: missing expected identity; not replacing"
+  exit 1
+fi
+
+# Wait for the Electron process to exit (max ~90s). Timeout must not replace.
+exited=0
 for i in $(seq 1 180); do
   if ! kill -0 "$APP_PID" 2>/dev/null; then
     echo "app exited after \${i} polls"
+    exited=1
     break
   fi
   sleep 0.5
 done
-# Brief settle so file handles release
+if [ "$exited" -ne 1 ]; then
+  echo "ERROR: app still running after wait; not replacing"
+  exit 1
+fi
 sleep 1
 
 if [ ! -f "$ZIP" ]; then
@@ -268,6 +295,33 @@ if [ -z "\${NEW_APP:-}" ] || [ ! -d "$NEW_APP" ]; then
 fi
 echo "new app: $NEW_APP"
 
+ACTUAL_BUNDLE_ID="$(defaults read "$NEW_APP/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+ACTUAL_VERSION="$(defaults read "$NEW_APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)"
+EXEC_BIN="$(/usr/bin/find "$NEW_APP/Contents/MacOS" -type f -perm +111 2>/dev/null | /usr/bin/head -1)"
+ACTUAL_ARCH="$(lipo -archs "$EXEC_BIN" 2>/dev/null || uname -m)"
+if [ -z "$ACTUAL_BUNDLE_ID" ] || [ -z "$ACTUAL_VERSION" ] || [ -z "$ACTUAL_ARCH" ]; then
+  echo "ERROR: could not read new app identity; not replacing"
+  exit 1
+fi
+if [ "$ACTUAL_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
+  echo "ERROR: bundle id mismatch expected=$EXPECTED_BUNDLE_ID actual=$ACTUAL_BUNDLE_ID"
+  exit 1
+fi
+if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+  echo "ERROR: version mismatch expected=$EXPECTED_VERSION actual=$ACTUAL_VERSION"
+  exit 1
+fi
+ARCH_OK=0
+if [ "$EXPECTED_ARCH" = "arm64" ] || [ "$EXPECTED_ARCH" = "aarch64" ]; then
+  case " $ACTUAL_ARCH " in *" arm64 "*) ARCH_OK=1 ;; esac
+else
+  case " $ACTUAL_ARCH " in *" x86_64 "*|*" x64 "*) ARCH_OK=1 ;; esac
+fi
+if [ "$ARCH_OK" -ne 1 ]; then
+  echo "ERROR: arch mismatch expected=$EXPECTED_ARCH actual=$ACTUAL_ARCH"
+  exit 1
+fi
+
 # Replace in place (rename old aside, then move new; restore on failure)
 BACKUP="\${DEST}.pre-update"
 rm -rf "$BACKUP" 2>/dev/null || true
@@ -293,20 +347,17 @@ else
   fi
 fi
 
-rm -rf "$BACKUP" 2>/dev/null || true
-
-# Unsigned Safari/Gatekeeper quarantine on the replaced bundle
+# Keep the previous bundle until the new app actually launches.
 xattr -cr "$DEST" 2>/dev/null || true
 
 echo "launching $DEST"
-open "$DEST" || {
-  echo "open failed, trying exec"
-  EXEC="$DEST/Contents/MacOS/Grok Desktop"
-  if [ -x "$EXEC" ]; then
-    nohup "$EXEC" >/dev/null 2>&1 &
-  fi
-}
-echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) done ===="
+if ! open "$DEST"; then
+  echo "open failed — restoring backup"
+  rm -rf "$DEST" 2>/dev/null || true
+  [ -d "$BACKUP" ] && mv "$BACKUP" "$DEST"
+  exit 1
+fi
+echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) launched; backup kept at $BACKUP ===="
 `;
 
   try {
@@ -332,7 +383,7 @@ echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) done ===="
   try {
     const child = spawn(
       "/bin/bash",
-      [scriptPath, logPath, String(process.pid), zipPath, appPath],
+      [scriptPath, logPath, String(process.pid), zipPath, appPath, expectedBundleId, expectedVersion, expectedArch],
       {
         detached: true,
         stdio: "ignore",
@@ -436,6 +487,23 @@ function ensureWired(hooks = {}) {
   autoUpdater.on("error", (err) => {
     busy = false;
     console.warn("[auto-update]", err?.message || err);
+    if (suppressErrorDialog) return;
+    const formatted = formatUpdateCheckError(err);
+    void box({
+      type: "warning",
+      buttons: formatted.offerReleases ? ["OK", "Open Releases"] : ["OK"],
+      defaultId: 0,
+      cancelId: 0,
+      title: formatted.title,
+      message: formatted.message,
+      detail: formatted.detail,
+    }).then(({ response }) => {
+      if (response === 1 && formatted.offerReleases) {
+        import("electron").then(({ shell }) =>
+          shell.openExternal(formatted.releasesUrl || UPDATE_RELEASES_URL),
+        );
+      }
+    });
   });
 
   autoUpdater.on("update-available", (info) => {
@@ -453,6 +521,7 @@ function ensureWired(hooks = {}) {
 
   autoUpdater.on("update-downloaded", async (info) => {
     busy = false;
+    lastDownloadedUpdate = info;
     const version = info?.version || "a new version";
     const { response } = await box({
       type: "info",
@@ -483,44 +552,6 @@ function isTransientNetworkError(err) {
   return /ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_FAILED|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|network changed|temporarily unavailable/i.test(
     msg,
   );
-}
-
-/**
- * Short user-facing detail — electron-updater often appends the full Atom XML
- * feed on parse failures, which makes the dialog unreadable.
- * @param {unknown} err
- * @returns {{ title: string, message: string, detail: string, transient: boolean }}
- */
-function formatUpdateCheckError(err) {
-  const raw = String(err?.message || err || "Unknown error");
-  const transient = isTransientNetworkError(err);
-  // Drop giant Atom/XML dumps and keep the first meaningful line
-  const withoutXml = raw
-    .replace(/,?\s*XML:\s*[\s\S]*$/i, "")
-    .replace(/<\?xml[\s\S]*$/i, "")
-    .trim();
-  const head = withoutXml.split("\n")[0]?.slice(0, 280) || withoutXml.slice(0, 280);
-
-  if (transient || /Unable to find latest version on GitHub/i.test(raw)) {
-    return {
-      title: "Could not reach GitHub",
-      message: "Network glitch while checking for updates.",
-      detail:
-        "The release feed is fine — this is usually a brief network change (Wi‑Fi, VPN, or sleep). Try again in a moment.\n\n" +
-        "If it keeps failing, use Open Releases and install the latest DMG/Setup once.\n\n" +
-        head,
-      transient: true,
-    };
-  }
-
-  return {
-    title: "Could not check for updates",
-    message: "Auto-update check failed.",
-    detail:
-      head +
-      "\n\nIf this build is older than the first release that ships update metadata (latest.yml), download the latest installer once from Releases — later checks will work in-app.",
-    transient: false,
-  };
 }
 
 /**
@@ -613,13 +644,11 @@ export async function checkForUpdatesInteractive(hooks = {}) {
       cancelId: 0,
       title: "Updates",
       message: "The auto-updater could not start.",
-      detail: "You can download the latest installer from GitHub Releases.",
+      detail: "You can download the latest installer from this edition's GitHub Releases.",
     }).then(({ response }) => {
       if (response === 1) {
         import("electron").then(({ shell }) =>
-          shell.openExternal(
-            "https://github.com/liaan/grok-desktop/releases/latest",
-          ),
+          shell.openExternal(UPDATE_RELEASES_URL),
         );
       }
     });
@@ -627,6 +656,7 @@ export async function checkForUpdatesInteractive(hooks = {}) {
   }
 
   busy = true;
+  suppressErrorDialog = true;
   try {
     // Checking dialog is non-blocking; result dialogs come after resolve.
     // Retry transient net::ERR_NETWORK_CHANGED etc. (common on Mac Wi‑Fi/VPN).
@@ -676,20 +706,19 @@ export async function checkForUpdatesInteractive(hooks = {}) {
     busy = false;
     const formatted = formatUpdateCheckError(err);
     console.warn("[auto-update] check failed:", err?.message || err);
+    const buttons = formatted.offerReleases ? ["OK", "Open Releases"] : ["OK"];
     const { response } = await box({
       type: "warning",
-      buttons: ["OK", "Open Releases"],
+      buttons,
       defaultId: 0,
       cancelId: 0,
       title: formatted.title,
       message: formatted.message,
       detail: formatted.detail,
     });
-    if (response === 1) {
+    if (response === 1 && formatted.offerReleases) {
       const { shell } = await import("electron");
-      await shell.openExternal(
-        "https://github.com/liaan/grok-desktop/releases/latest",
-      );
+      await shell.openExternal(formatted.releasesUrl || UPDATE_RELEASES_URL);
     }
     return {
       ok: false,
@@ -697,6 +726,8 @@ export async function checkForUpdatesInteractive(hooks = {}) {
       error: err?.message || String(err),
       transient: formatted.transient,
     };
+  } finally {
+    suppressErrorDialog = false;
   }
 }
 

@@ -31,6 +31,7 @@ import {
   shouldFallbackToNewSession,
 } from "./agent-restart.mjs";
 import { settleParked, wrapParked } from "./parked-request.mjs";
+import { restoreParkedAgent, rollbackLiveAgent } from "../shared/parked-agent.mjs";
 
 /**
  * Desktop state loader — set once from main at startup.
@@ -565,6 +566,8 @@ export function ensureAgent(ws, cwd, opts = {}) {
       }
     }
 
+    const previousLiveId = agent?.sessionId ? String(agent.sessionId) : null;
+
     // Switching chats must not session/load on a live process — that cancels
     // the in-flight turn. Park the current agent and reuse a parked one.
     if (!forceNew && resumeSessionId) {
@@ -839,6 +842,11 @@ export function ensureAgent(ws, cwd, opts = {}) {
     } catch (err) {
       if (ws.agent === agent) ws.agent = null;
       await disposeOrphanClient(agent);
+      const restored = restoreParkedAgent(ws, previousLiveId);
+      if (restored) {
+        rememberProjectOnWindow(ws, restored.cwd, restored.sessionId);
+        restartBackgroundTaskTail(ws, restored.cwd, restored.sessionId);
+      }
       throw err;
     }
 
@@ -943,6 +951,7 @@ export async function openSessionOnWindow(ws, opts) {
   }
 
   const gen = ws.generation;
+  const previousLiveId = ws.agent?.sessionId ? String(ws.agent.sessionId) : null;
   let client;
   let resumeWarning = null;
   try {
@@ -953,45 +962,54 @@ export async function openSessionOnWindow(ws, opts) {
     throw err;
   }
 
-  if (!isSessionLive(ws, gen)) {
-    await disposeOrphanClient(client);
-    throw new Error("Window closed");
+  try {
+    if (!isSessionLive(ws, gen)) {
+      throw new Error("Window closed");
+    }
+
+    opts.remember?.(cwd, client.sessionId);
+    setWindowTitle(ws, client.cwd);
+    restartBackgroundTaskTail(ws, cwd, client.sessionId);
+
+    let history = [];
+    /** @type {any[]} */
+    let backgroundTasks = [];
+    /** @type {any[]} */
+    let scheduledTasks = [];
+    /** @type {any} */
+    let usage = null;
+    if (client.sessionId && !forceNew && opts.loadState) {
+      const loaded = opts.loadState(cwd, client.sessionId);
+      history = loaded.items || [];
+      backgroundTasks = loaded.tasks || [];
+      scheduledTasks = loaded.scheduledTasks || [];
+      usage = loaded.usage || null;
+    }
+
+    return {
+      cwd: client.cwd,
+      sessionId: client.sessionId,
+      grokBinary: client.grokPath,
+      resumed: Boolean(resumeSessionId) && !forceNew,
+      ...client._modelsPublic(),
+      history,
+      backgroundTasks,
+      scheduledTasks,
+      usage,
+      historySeq: Number(client.updateSeq) || 0,
+      sessions: opts.listSessions?.(cwd) || [],
+      warning: resumeWarning,
+      turnOpen: Boolean(client.turnOpen),
+    };
+  } catch (err) {
+    const restored = rollbackLiveAgent(ws, previousLiveId);
+    if (restored) {
+      rememberProjectOnWindow(ws, restored.cwd, restored.sessionId);
+      restartBackgroundTaskTail(ws, restored.cwd, restored.sessionId);
+      setWindowTitle(ws, restored.cwd);
+    }
+    throw err;
   }
-
-  opts.remember?.(cwd, client.sessionId);
-  setWindowTitle(ws, client.cwd);
-  restartBackgroundTaskTail(ws, cwd, client.sessionId);
-
-  let history = [];
-  /** @type {any[]} */
-  let backgroundTasks = [];
-  /** @type {any[]} */
-  let scheduledTasks = [];
-  /** @type {any} */
-  let usage = null;
-  if (client.sessionId && !forceNew && opts.loadState) {
-    const loaded = opts.loadState(cwd, client.sessionId);
-    history = loaded.items || [];
-    backgroundTasks = loaded.tasks || [];
-    scheduledTasks = loaded.scheduledTasks || [];
-    usage = loaded.usage || null;
-  }
-
-  return {
-    cwd: client.cwd,
-    sessionId: client.sessionId,
-    grokBinary: client.grokPath,
-    resumed: Boolean(resumeSessionId) && !forceNew,
-    ...client._modelsPublic(),
-    history,
-    backgroundTasks,
-    scheduledTasks,
-    usage,
-    historySeq: Number(client.updateSeq) || 0,
-    sessions: opts.listSessions?.(cwd) || [],
-    warning: resumeWarning,
-    turnOpen: Boolean(client.turnOpen),
-  };
 }
 
 /**

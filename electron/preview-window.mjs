@@ -23,6 +23,7 @@ import {
   formatPreviewCapturePrompt,
   normalizePreviewUrl,
 } from "./preview-url.mjs";
+import { persistablePreviewUrl } from "../shared/preview-url.mjs";
 import {
   formatPreviewSnapshot,
   PAGE_SNAPSHOT_SCRIPT,
@@ -183,7 +184,7 @@ function persistNow() {
   if (!persist || !isLive()) return;
   persist({
     previewBounds: previewWin.getBounds(),
-    previewLastUrl: lastUrl === "about:blank" ? "" : lastUrl,
+    previewLastUrl: persistablePreviewUrl(lastUrl),
     previewViewport: viewportId,
   });
 }
@@ -207,7 +208,7 @@ export function previewPublicState() {
     leaseId: ownership.get()?.leaseId || null,
     ownerSessionId: ownership.get()?.sessionId || null,
     open: isLive(),
-    url: lastUrl,
+    url: persistablePreviewUrl(lastUrl) || (lastUrl === "about:blank" ? "about:blank" : ""),
     title: lastTitle,
     viewport: viewportId,
     loading,
@@ -909,9 +910,9 @@ export async function sendPreviewCaptureToChat() {
     height: shot.height,
     bytes: shot.bytes,
     tokens: shot.tokens,
-    url: lastUrl,
+    url: persistablePreviewUrl(lastUrl) || lastUrl,
     title: lastTitle,
-    text: formatPreviewCapturePrompt({ url: lastUrl, title: lastTitle }),
+    text: formatPreviewCapturePrompt({ url: persistablePreviewUrl(lastUrl) || lastUrl, title: lastTitle }),
   };
   owner.webContents.send("preview:viewport-capture", payload);
   return {

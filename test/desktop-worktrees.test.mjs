@@ -226,6 +226,11 @@ test("registerValidatedFamily refuses too-broad source that survived list filter
   assert.equal(extraAllowedRootsFor(src).length, 0);
 });
 
+test("home as the default conversation folder is allowed without becoming a git worktree source", () => {
+  assert.equal(isTooBroadRoot(os.homedir()), true);
+  assert.equal(shouldAutoTrustFolder(os.homedir()), true);
+});
+
 test("isTooBroadRoot / isGrokAcpWorktreePath allowlist", (t) => {
   const home = isolateGrokHome(t);
   const src = tmpDir(t, "grok-allow-src-");
