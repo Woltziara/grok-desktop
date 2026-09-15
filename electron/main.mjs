@@ -958,6 +958,7 @@ function registerIpc() {
     return {
       version: app.getVersion(),
       buildIdentity: readBuildIdentity(app.getAppPath(), app.getVersion()),
+      runtimeVersions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node },
       pid: process.pid,
       executable: process.execPath,
       appPath: app.getAppPath(),
@@ -2350,6 +2351,7 @@ app.whenReady().then(() => {
   if (printInfo) {
     process.stdout.write(JSON.stringify({
       version: app.getVersion(),
+      runtimeVersions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node },
       buildIdentity: readBuildIdentity(app.getAppPath(), app.getVersion()),
       pid: process.pid,
       executable: process.execPath,
@@ -2363,6 +2365,12 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
+  const aboutIdentity = readBuildIdentity(app.getAppPath(), app.getVersion());
+  app.setAboutPanelOptions({
+    applicationName: "Grok Desktop",
+    applicationVersion: app.getVersion(),
+    version: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · ${aboutIdentity.sourceCommit?.slice(0, 8) || "development"} · PID ${process.pid}`,
+  });
   setDesktopStateLoader(loadState);
   setAllowPrerelease(Boolean(loadState().allowPrerelease));
   registerIpc();

@@ -384,6 +384,7 @@ export type OpenProjectResult = {
 };
 
 export type AppInfo = {
+  runtimeVersions?: { electron?: string; chromium?: string; node?: string };
   buildIdentity?: {schema:number;version:string;sourceCommit:string|null;sourceDigest:string|null;dirty:boolean|null;unverified?:boolean};
   version: string;
   pid: number;

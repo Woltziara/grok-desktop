@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "1.4.2-unified.2",
+  "version": "1.5.0",
   "description": "Desktop GUI for the Grok Build coding agent (Electron + ACP)",
   "main": "electron/main.mjs",
   "type": "module",
@@ -28,7 +28,10 @@
     "test:sidebar": "node scripts/test-sidebar.mjs",
     "test:delivery": "node scripts/test-delivery.mjs",
     "test:knowledge-transfer": "node scripts/test-knowledge-transfer.mjs",
-    "test:continuation": "node scripts/test-continuation.mjs"
+    "test:continuation": "node scripts/test-continuation.mjs",
+    "test:browser-reference": "node scripts/run-desktop-check.mjs test/electron/browser-reference-smoke.mjs",
+    "test:session-switch": "node scripts/run-desktop-check.mjs test/electron/session-switch-smoke.mjs",
+    "test:desktop": "npm run test:preview && npm run test:sidebar && npm run test:delivery && npm run test:knowledge-transfer && npm run test:continuation && npm run test:browser-reference && npm run test:session-switch"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -121,7 +124,8 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "identity": null,
-      "artifactName": "GrokDesktop-${version}-Mac-${arch}.${ext}"
+      "artifactName": "GrokDesktop-${version}-Mac-${arch}.${ext}",
+      "minimumSystemVersion": "13.0"
     },
     "dmg": {
       "writeUpdateInfo": true
@@ -139,5 +143,8 @@
       "artifactName": "GrokDesktop-${version}-Linux-x64.${ext}"
     },
     "electronDist": "node_modules/electron/dist"
+  },
+  "engines": {
+    "node": ">=24.19.0"
   }
 }
