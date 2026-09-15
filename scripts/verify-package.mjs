@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
 const plistParser = require("plist");
+const yaml = require("js-yaml");
 
 function fail(message) {
   throw new Error(`[package-integrity] ${message}`);
@@ -50,6 +51,29 @@ function packageJsonAt(asarPath, unpacked, dep) {
   fail(`direct dependency ${dep} is absent from app.asar and app.asar.unpacked`);
 }
 
+function readUpdateConfig(file) {
+  if (!exists(file)) fail(`missing updater config: ${file}`);
+  let config;
+  try { config = yaml.load(fs.readFileSync(file, "utf8")); }
+  catch (err) { fail(`cannot parse updater config (${file}): ${err.message}`); }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    fail("updater config must be a YAML object");
+  }
+  for (const field of ["provider", "owner", "repo", "updaterCacheDirName"]) {
+    if (typeof config[field] !== "string" || !config[field].trim()) {
+      fail(`updater config ${field} is missing or empty`);
+    }
+  }
+  if (config.provider !== "github") fail(`updater config provider must be github, found ${config.provider}`);
+  if (config.token != null || config.requestHeaders != null || config.private === true) {
+    fail("updater config must contain only public update-source metadata, never credentials or private-repository settings");
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(config.updaterCacheDirName)) {
+    fail("updaterCacheDirName must be a safe single directory name");
+  }
+  return config;
+}
+
 export function verifyPackage(appPath, options = {}) {
   const contents = path.join(appPath, "Contents");
   const resources = path.join(contents, "Resources");
@@ -72,6 +96,16 @@ export function verifyPackage(appPath, options = {}) {
   let packageJson;
   try { packageJson = JSON.parse(packageBuffer.toString("utf8")); }
   catch { fail("app.asar package.json is invalid JSON"); }
+
+  const updateConfig = readUpdateConfig(path.join(resources, "app-update.yml"));
+  const expectedUpdateConfig = options.expectedUpdateConfig;
+  if (expectedUpdateConfig) {
+    for (const field of ["provider", "owner", "repo", "updaterCacheDirName"]) {
+      if (updateConfig[field] !== expectedUpdateConfig[field]) {
+        fail(`updater config ${field} mismatch: expected ${expectedUpdateConfig[field]}, found ${updateConfig[field]}`);
+      }
+    }
+  }
   const expected = options.expectedDependencies;
   if (expected) {
     const actualEntries = Object.entries(packageJson.dependencies || {}).sort();
@@ -92,7 +126,13 @@ export function verifyPackage(appPath, options = {}) {
     const actual = createHash("sha256").update(asar.getRawHeader(asarPath).headerString).digest("hex");
     if (String(integrity.hash || "").toLowerCase() !== actual) fail("ElectronAsarIntegrity hash does not match app.asar header");
   }
-  return { appPath, bundleName, dependencies: Object.keys(packageJson.dependencies || {}), integrityChecked: Boolean(integrity) };
+  return {
+    appPath,
+    bundleName,
+    dependencies: Object.keys(packageJson.dependencies || {}),
+    integrityChecked: Boolean(integrity),
+    updateConfig,
+  };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -102,5 +142,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const expectedDependencies = exists(sourceManifest)
     ? JSON.parse(fs.readFileSync(sourceManifest, "utf8")).dependencies || {}
     : undefined;
-  console.log(JSON.stringify(verifyPackage(path.resolve(appPath), { expectedDependencies })));
+  let expectedUpdateConfig;
+  if (exists(sourceManifest)) {
+    const manifest = JSON.parse(fs.readFileSync(sourceManifest, "utf8"));
+    const publish = Array.isArray(manifest.build?.publish) ? manifest.build.publish[0] : manifest.build?.publish;
+    if (publish?.provider === "github") {
+      expectedUpdateConfig = {
+        provider: "github",
+        owner: publish.owner,
+        repo: publish.repo,
+        updaterCacheDirName: `${manifest.name.toLowerCase()}-updater`,
+      };
+    }
+  }
+  console.log(JSON.stringify(verifyPackage(path.resolve(appPath), { expectedDependencies, expectedUpdateConfig })));
 }
