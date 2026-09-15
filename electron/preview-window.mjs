@@ -23,7 +23,8 @@ import {
   formatPreviewCapturePrompt,
   normalizePreviewUrl,
 } from "./preview-url.mjs";
-import { persistablePreviewUrl } from "../shared/preview-url.mjs";
+import { persistablePreviewUrl, publicPreviewHref } from "../shared/preview-url.mjs";
+import { previewPageIdentity } from "./browser-reference.mjs";
 import {
   formatPreviewSnapshot,
   PAGE_SNAPSHOT_SCRIPT,
@@ -80,6 +81,7 @@ let ownerWin = null;
 const ownership = createPreviewOwnership();
 let ownerSessionIdForWindow = () => null;
 let openingPreview = null;
+let closingPreview = null;
 /** @type {((win: import('electron').BrowserWindow) => boolean) | null} */
 let ownerHasProject = null;
 
@@ -182,9 +184,10 @@ export function preferredPreviewBounds(owner, saved) {
 
 function persistNow() {
   if (!persist || !isLive()) return;
+  const safeUrl = persistablePreviewUrl(lastUrl);
   persist({
     previewBounds: previewWin.getBounds(),
-    previewLastUrl: persistablePreviewUrl(lastUrl),
+    ...(safeUrl === null ? {} : { previewLastUrl: safeUrl }),
     previewViewport: viewportId,
   });
 }
@@ -192,7 +195,9 @@ function persistNow() {
 function emitChrome() {
   const payload = previewPublicState();
   try {
-    chromeWc()?.send("preview:state", payload);
+    // Only the browser's own address bar receives its live URL. Model-facing
+    // state and persistence use the public URL, never the login callback.
+    chromeWc()?.send("preview:state", { ...payload, url: lastUrl });
   } catch {
     /* chrome may be gone */
   }
@@ -208,7 +213,8 @@ export function previewPublicState() {
     leaseId: ownership.get()?.leaseId || null,
     ownerSessionId: ownership.get()?.sessionId || null,
     open: isLive(),
-    url: persistablePreviewUrl(lastUrl) || (lastUrl === "about:blank" ? "about:blank" : ""),
+    url: publicPreviewHref(lastUrl) || (lastUrl === "about:blank" ? "about:blank" : ""),
+    pageId: previewPageIdentity(lastUrl),
     title: lastTitle,
     viewport: viewportId,
     loading,
@@ -557,6 +563,7 @@ export async function requestPreviewOpen(owner, sessionId, url = "") {
 }
 
 export async function openPreviewWindow(opts = {}) {
+  if (closingPreview) await closingPreview;
   const owner = opts.owner || null;
   const sessionId = opts.sessionId || ownerSessionIdForWindow(owner);
   if (openingPreview) await openingPreview.catch(() => {});
@@ -596,6 +603,11 @@ async function openOwnedPreview(opts) {
     const guard = lifetimeGuard();
 
     const persistSoon = debounce(persistNow, 250);
+    win.on("close", () => {
+      if (!closingPreview) closingPreview = new Promise(resolve => {
+        win.once("closed", () => { closingPreview = null; resolve(); });
+      });
+    });
     win.on("resize", () => {
       layoutGuest();
       persistSoon();
@@ -807,14 +819,14 @@ export async function snapshotPreview() {
       const raw = await snapshotGuestPage();
       guard();
       const text = formatPreviewSnapshot({
-        url: raw.url || lastUrl,
+        url: publicPreviewHref(raw.url || lastUrl),
         title: raw.title || lastTitle,
         yaml: raw.yaml,
         engine: "playwright",
       });
       return {
         text,
-        url: raw.url || lastUrl,
+        url: publicPreviewHref(raw.url || lastUrl),
         title: raw.title || lastTitle,
         chars: text.length,
         engine: "playwright",
@@ -827,10 +839,11 @@ export async function snapshotPreview() {
   }
   const raw = await wc.executeJavaScript(PAGE_SNAPSHOT_SCRIPT, true);
   guard();
-  const text = formatPreviewSnapshot(raw || {});
+  const safeUrl = publicPreviewHref(raw?.url || lastUrl);
+  const text = formatPreviewSnapshot({ ...raw, url: safeUrl });
   return {
     text,
-    url: raw?.url || lastUrl,
+    url: safeUrl,
     title: raw?.title || lastTitle,
     chars: text.length,
     engine: "dom",
@@ -910,9 +923,9 @@ export async function sendPreviewCaptureToChat() {
     height: shot.height,
     bytes: shot.bytes,
     tokens: shot.tokens,
-    url: persistablePreviewUrl(lastUrl) || lastUrl,
+    url: publicPreviewHref(lastUrl),
     title: lastTitle,
-    text: formatPreviewCapturePrompt({ url: persistablePreviewUrl(lastUrl) || lastUrl, title: lastTitle }),
+    text: formatPreviewCapturePrompt({ url: publicPreviewHref(lastUrl), title: lastTitle }),
   };
   owner.webContents.send("preview:viewport-capture", payload);
   return {

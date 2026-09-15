@@ -1,72 +1,58 @@
-/** Preview URLs: opaque identity keeps routing; public form strips auth only. */
-
-const AUTH_QUERY =
-  /^(?:code|state|session_state|access_token|refresh_token|id_token|token|client_secret|oauth_token|authenticity_token|id_token_hint)$/i;
+/** Presentation URLs never serve as the authority for page identity. */
+const SECRET_QUERY = /^(?:code|(?:access|refresh|id|oauth)[_-]?token|token|client[_-]?secret|authenticity[_-]?token|id[_-]?token[_-]?hint|samlresponse|assertion)$/i;
+const AUTH_PATH = /(?:^|\/)(?:oauth2?|oidc|authorize|callback|signin|sign-in|login|sso|auth)(?:\/|$)/i;
 
 function httpUrl(raw) {
   try {
     const url = new URL(String(raw || ""));
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    return url;
-  } catch {
-    return null;
-  }
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch { return null; }
 }
-
-function isOauthHash(hash) {
-  const h = String(hash || "");
-  return /^(#|#!)?(?:access_token|id_token|token|code|session_state)=/i.test(h);
+function authPath(pathname, hostname = "") {
+  return AUTH_PATH.test(pathname) || /^auth\./i.test(hostname) || /^(?:accounts\.google\.com|login\.microsoftonline\.com)$/i.test(hostname);
 }
+function hasSecret(params) { return [...params.keys()].some(key => SECRET_QUERY.test(key)); }
 
-function keepHash(hash) {
-  const h = String(hash || "");
-  if (!h || h === "#") return false;
-  if (h.startsWith("#/") || h.startsWith("#!/")) return true;
-  if (isOauthHash(h) || h.includes("=")) return false;
-  return false;
-}
-
-/** Full page identity: keep query and hash, drop userinfo. */
+/** Main-process input to an opaque hash. Never broadcast or persist this value. */
 export function previewIdentityHref(raw) {
   const url = httpUrl(raw);
   if (!url) return "";
-  url.username = "";
-  url.password = "";
+  url.username = ""; url.password = "";
   return url.href;
 }
 
+/** Model-facing and cross-window presentation: no query, fragment or userinfo. */
 export function publicPreviewHref(raw) {
   const url = httpUrl(raw);
   if (!url) return "";
-  url.username = "";
-  url.password = "";
-  for (const key of [...url.searchParams.keys()]) {
-    if (AUTH_QUERY.test(key)) url.searchParams.delete(key);
-  }
-  if (!keepHash(url.hash)) url.hash = "";
+  url.username = ""; url.password = ""; url.search = ""; url.hash = "";
   return url.href;
 }
-
-export function canonicalPreviewHref(raw) {
-  return publicPreviewHref(raw);
-}
-
+export function canonicalPreviewHref(raw) { return publicPreviewHref(raw); }
 export function safePreviewLabel(raw) {
   const href = publicPreviewHref(raw);
   if (!href) return "浏览器页面";
-  try {
-    const url = new URL(href);
-    const path =
-      url.pathname.length > 160 ? `${url.pathname.slice(0, 157)}…` : url.pathname;
-    const query = url.search.length > 80 ? `${url.search.slice(0, 77)}…` : url.search;
-    const hash = url.hash.length > 80 ? `${url.hash.slice(0, 77)}…` : url.hash;
-    return `${url.origin}${path === "/" && !query && !hash ? "" : path}${query}${hash}`;
-  } catch {
-    return "浏览器页面";
-  }
+  const url = new URL(href);
+  const pathname = url.pathname.length > 240 ? `${url.pathname.slice(0, 237)}…` : url.pathname;
+  return `${url.origin}${pathname === "/" ? "" : pathname}`;
 }
 
+/** null preserves the last safe destination instead of replaying an OAuth URL. */
 export function persistablePreviewUrl(raw) {
   if (!raw || raw === "about:blank") return "";
-  return publicPreviewHref(raw);
+  const url = httpUrl(raw);
+  if (!url) return "";
+  if (url.username || url.password || authPath(url.pathname, url.hostname) || hasSecret(url.searchParams)) return null;
+  const fragment = url.hash.slice(1);
+  const bang = fragment.startsWith("!/");
+  if (fragment.startsWith("/") || bang) {
+    const route = new URL(bang ? fragment.slice(1) : fragment, "https://hash-route.invalid");
+    if (authPath(route.pathname) || hasSecret(route.searchParams)) return null;
+    const nested = new URLSearchParams(route.hash.slice(1));
+    if (hasSecret(nested) || nested.has("session_state")) return null;
+  } else if (fragment.includes("=")) {
+    const params = new URLSearchParams(fragment);
+    if (hasSecret(params) || params.has("state") || params.has("session_state")) return null;
+  }
+  return url.href;
 }

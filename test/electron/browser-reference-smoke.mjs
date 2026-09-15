@@ -50,7 +50,8 @@ app.whenReady().then(async () => {
     cancel() {}
   }
   const agent = new Peer(), ws = { agent, parkedAgents: new Map(), lastSessionId: sessionId };
-  preview.registerPreviewIpc({ loadState: () => ({ theme: "light" }), savePatch: () => {}, broadcast: payload => owner.webContents.send("preview:changed", payload), getOwner: e => e?.sender === owner.webContents ? owner : null, getOwnerSessionId: w => w === owner ? sessionId : null, ownerHasProject: () => true });
+  const persisted = { theme: "light" };
+  preview.registerPreviewIpc({ loadState: () => persisted, savePatch: patch => Object.assign(persisted, patch), broadcast: payload => owner.webContents.send("preview:changed", payload), getOwner: e => e?.sender === owner.webContents ? owner : null, getOwnerSessionId: w => w === owner ? sessionId : null, ownerHasProject: () => true });
   const address = await api.startPreviewApi({ windowById: id => BrowserWindow.fromId(id) });
   const scope = issuePreviewScope({ windowId: owner.id, getSessionId: () => sessionId, isLive: () => !owner.isDestroyed() });
   const headers = Object.fromEntries(previewMcpHttpServers(address, owner.id, scope)[0].headers.map(h => [h.name, h.value]));
@@ -70,7 +71,23 @@ app.whenReady().then(async () => {
     await page.locator("textarea").fill("read the referenced page"); await page.locator("textarea").press("Enter");
     for (let i = 0; i < 100 && !agent.snapshot; i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(agent.text, "read the referenced page"); assert.ok(agent.opts.browserReference?.pageId); assert.match(agent.snapshot, /Owned reference canary/);
+    assert.doesNotMatch(agent.snapshot, /do-not-leak|#private/);
     assert.equal(await page.getByLabel("浏览器引用", { exact: true }).count(), 0);
+    const aUrl = `http://127.0.0.1:${port}/fixture/orders?state=open#/order/1`;
+    const bUrl = `http://127.0.0.1:${port}/fixture/orders?state=closed#/order/1`;
+    await preview.navigatePreview(aUrl);
+    const aRef = await owner.webContents.executeJavaScript(`window.grokDesktop.captureBrowserReference(${JSON.stringify(sessionId)})`);
+    await preview.navigatePreview(bUrl);
+    assert.throws(() => validateBrowserReference(aRef, preview.previewPublicState(), sessionId), /重新点 @浏览器/);
+    // Closing forces persistence through the production producer.
+    preview.closePreviewWindow();
+    assert.equal(persisted.previewLastUrl, bUrl);
+    await preview.openPreviewWindow({ owner, sessionId, url: `http://127.0.0.1:${port}/fixture/app#/callback?access_token=SYNTHETIC_SECRET` });
+    const safeState = preview.previewPublicState();
+    const authRef = captureBrowserReference(safeState, sessionId);
+    assert.doesNotMatch(JSON.stringify(safeState) + JSON.stringify(authRef) + (await preview.snapshotPreview()).text, /SYNTHETIC_SECRET/);
+    preview.closePreviewWindow();
+    assert.equal(persisted.previewLastUrl, bUrl, "a login callback must not replace the last safe destination");
     console.log(JSON.stringify({ ok: true, electron: process.versions.electron, chromium: process.versions.chrome, checks: ["production Composer @浏览器 click showed a removable query-free chip", "Enter kept the exact user text and delivered the separate browser reference", "the conversation-scoped MCP snapshot read the referenced Owned Preview page"] }, null, 2));
   } catch (error) {
     console.error(error.stack); process.exitCode = 1;

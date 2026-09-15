@@ -15,7 +15,7 @@ test("client_secret keys are redacted and preview persistence drops query creden
   assert.doesNotMatch(JSON.stringify(san), /oauth-client-secret|test-code|test-cookie|account:secret/);
   assert.equal(
     persistablePreviewUrl("https://user:pass@accounts.example.test/login?code=SECRET#frag"),
-    "https://accounts.example.test/login",
+    null,
   );
   assert.equal(
     persistablePreviewUrl("https://example.test/record?id=A#/keep"),

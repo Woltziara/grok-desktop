@@ -898,6 +898,7 @@ declare global {
       closePreview: () => Promise<boolean>;
       previewState: () => Promise<{
         leaseId?: string | null;
+        pageId?: string | null;
         ownerSessionId?: string | null;
         open: boolean;
         url: string;
