@@ -50,10 +50,14 @@ function stripImagePayload(images) {
 function viewState(state) {
   return { ...state, items: state.items.map(item => ({ ...item, images: stripImagePayload(item.images) })) };
 }
-const signature = payload => createHash('sha256').update(JSON.stringify([
-  payload.text, payload.images.map(i => [i.mimeType, i.data]), payload.imageQuality,
-  payload.timelineText, payload.origin, payload.purpose,
-])).digest('hex');
+const signature = payload => {
+  const parts = [payload.text, payload.images.map(i => [i.mimeType, i.data]), payload.imageQuality,
+    payload.timelineText, payload.origin, payload.purpose];
+  // Keep the legacy no-reference signature stable for pending outboxes created
+  // before browser references existed.
+  if (payload.browserReference) parts.push(payload.browserReference);
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+};
 function sid(value) {
   if (!isSafeSessionId(value)) throw new Error('无效的对话标识');
   return String(value);
@@ -71,6 +75,7 @@ function payloadOf(input) {
   const text = input.text.trim();
   if (!text && !images.length) throw new Error('请先写一句话或附上材料。');
   const result = { text, images, imageQuality: input.imageQuality === 'high' ? 'high' : 'compact', timelineText: String(input.timelineText || ''), origin: input.origin === 'followup' ? 'followup' : 'user', purpose: input.purpose === 'compact' ? 'compact' : '' };
+  if (input.browserReference) result.browserReference = clone(input.browserReference);
   if (result.purpose === 'compact') { result.text = COMPACT_PREP_PROMPT; result.origin = 'followup'; }
   if (images.length > 32 || Buffer.byteLength(JSON.stringify(result)) > 64 * 1024 * 1024) throw new Error('这次材料过大，请分开发送；草稿仍保留。');
   return result;
@@ -79,7 +84,7 @@ function finish(row, status) {
   row.status = status; row.settledAt = Date.now();
   if (TERMINAL.has(status)) {
     // Native history is canonical. Retain only a duplicate-prevention receipt.
-    delete row.text; delete row.images; delete row.timelineText; delete row.purpose;
+    delete row.text; delete row.images; delete row.timelineText; delete row.purpose; delete row.browserReference;
   }
 }
 
@@ -142,7 +147,7 @@ export function atomicWrite(file, value) {
   }
 }
 
-export function createSessionDelivery(root, { notify = () => {}, beforeCancel = () => {}, canRelocate = (a, b) => a === b, write } = {}) {
+export function createSessionDelivery(root, { notify = () => {}, beforeCancel = () => {}, canRelocate = (a, b) => a === b, validateBrowserReference = reference => reference, write } = {}) {
   const store = createSessionOutbox(root, { write });
   const bindings = new Map(), running = new Map(), inserting = new Map();
   const turns = new Map();
@@ -234,7 +239,8 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
     inserting.set(`${id}:${key}`, true);
     emit(id, 'started', row, { method: 'interject' });
     try {
-      const result = await client.interject(row.text, { images: row.images, imageQuality: row.imageQuality, interjectionId: row.attemptId });
+      const browserReference = validateBrowserReference(row.browserReference, client);
+      const result = await client.interject(row.text, { images: row.images, imageQuality: row.imageQuality, interjectionId: row.attemptId, browserReference });
       const follow = interjectFollowUp(result);
       if (follow === 'error') throw new Error(result?.error || result?.reason || '没能插入当前回合');
       store.change(id, value => {
@@ -267,9 +273,10 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
     const run = { cancelled: false, id: first.id }; running.set(id, run);
     let row, ok = false, errorText = '', uncertain = false;
     try {
+      const browserReference = validateBrowserReference(first.browserReference, client);
       store.change(id, next => { row = next.items.find(i => i.id === first.id); row.status = 'sending'; delete row.immediate; row.startedAt = Date.now(); row.attempt++; row.attemptId = randomUUID(); delete row.error; });
       emit(id, 'started', row, { method: 'prompt' });
-      const result = await client.prompt(row.text, { images: row.images, imageQuality: row.imageQuality, origin: row.origin });
+      const result = await client.prompt(row.text, { images: row.images, imageQuality: row.imageQuality, origin: row.origin, browserReference });
       if (result?.stopReason === 'cancelled' || result?.stop_reason === 'cancelled') run.cancelled = true;
       if (run.cancelled) throw new Error('cancelled');
       if (row.purpose === 'compact') {
@@ -311,6 +318,17 @@ export function createSessionDelivery(root, { notify = () => {}, beforeCancel = 
       if (!row || TERMINAL.has(row.status)) throw new Error('这条发送已处理，请刷新列表。');
       if (IN_FLIGHT.has(row.status)) throw new Error('这条内容已经发出，请先停止原回合，不能就地修改。');
       if (action === 'remove') { finish(row, 'dismissed'); return; }
+      if (action === 'refresh-browser-reference') {
+        if (!data.browserReference) throw new Error('当前浏览器页面没有成功引用，原发送记录未改。');
+        row.browserReference = clone(data.browserReference);
+        if (row.status === 'failed') { row.status = 'queued'; delete row.error; }
+        row.signature = signature(row); return;
+      }
+      if (action === 'remove-browser-reference') {
+        delete row.browserReference;
+        if (row.status === 'failed') { row.status = 'queued'; delete row.error; }
+        row.signature = signature(row); return;
+      }
       if (action === 'edit') { Object.assign(row, payloadOf({ ...row, text: String(data.text || ''), timelineText: '', purpose: '', origin: 'user' })); row.signature = signature(row); return; }
       if (action === 'move') {
         const pending = value.items.filter(i => !TERMINAL.has(i.status)), from = pending.indexOf(row), to = from + (data.direction < 0 ? -1 : 1);

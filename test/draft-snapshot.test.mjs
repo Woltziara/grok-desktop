@@ -22,3 +22,11 @@ test('changed quote content and image quality are not cleared by a stale receipt
   assert.equal(subtractSubmittedDraft(later,original).quotes[0].text,'改过引文');
   assert.notEqual(draftFingerprint(later),draftFingerprint(original));
 });
+test('browser references participate in draft identity and only the submitted reference is consumed',()=>{
+  const ref={version:1,kind:'owned-preview',sessionId:'s1',leaseId:'l1',pageId:'p1'};
+  const sent={...original,browserReference:ref};
+  assert.notEqual(draftFingerprint(sent),draftFingerprint(original));
+  assert.equal(subtractSubmittedDraft(sent,sent).browserReference,undefined);
+  const newer={...ref,leaseId:'l2',pageId:'p2'};
+  assert.deepEqual(subtractSubmittedDraft({...sent,browserReference:newer},sent).browserReference,newer);
+});

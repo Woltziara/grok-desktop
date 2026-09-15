@@ -12,6 +12,17 @@ export type PromptImage = {
   mimeType: string;
 };
 
+export type BrowserReference = {
+  version: 1;
+  kind: "owned-preview";
+  sessionId: string;
+  leaseId: string;
+  pageId: string;
+  title: string;
+  displayUrl: string;
+  capturedAt: number;
+};
+
 export type TimelineImage = {
   mimeType: string;
   previewUrl: string;
@@ -591,9 +602,10 @@ declare global {
         sessionId?: string;
         mode?: "new" | "resume";
       }) => Promise<OpenProjectResult>;
-      submitDelivery: (input: {id: string; sessionId: string; cwd: string; text: string; images: PromptImage[]; mode?: string; imageQuality?: "compact" | "high"; origin?: "user" | "followup"; timelineText?: string; purpose?: "compact"}) => Promise<{accepted: boolean; duplicate?: boolean; id: string; status: string; state: DeliveryState}>;
+      submitDelivery: (input: {id: string; sessionId: string; cwd: string; text: string; images: PromptImage[]; mode?: string; imageQuality?: "compact" | "high"; origin?: "user" | "followup"; timelineText?: string; purpose?: "compact"; browserReference?: BrowserReference}) => Promise<{accepted: boolean; duplicate?: boolean; id: string; status: string; state: DeliveryState}>;
       listOutbox: (sessionId: string) => Promise<DeliveryState>;
       mutateOutbox: (sessionId: string, action: string, data?: Record<string, unknown>) => Promise<DeliveryState>;
+      captureBrowserReference: (sessionId: string) => Promise<BrowserReference>;
       setSessionMode: (modeId: string) => Promise<{
         agentSynced: boolean;
         currentModeId: string | null;
@@ -885,11 +897,17 @@ declare global {
       }>;
       closePreview: () => Promise<boolean>;
       previewState: () => Promise<{
+        leaseId?: string | null;
+        ownerSessionId?: string | null;
         open: boolean;
         url: string;
         title: string;
         viewport: string;
         loading: boolean;
+        ownedElsewhere?: boolean;
+      }>;
+      navigatePreview: (url: string) => Promise<{
+        leaseId?: string | null; ownerSessionId?: string | null; open: boolean; url: string; title: string; viewport: string; loading: boolean; ownedElsewhere?: boolean;
       }>;
       previewSnapshot: () => Promise<{
         text: string;
@@ -971,6 +989,7 @@ export type DeliveryRow = {
   imageQuality?: "compact" | "high"; timelineText?: string; origin?: "user" | "followup";
   status: "queued" | "sending" | "interjecting" | "interjected" | "failed" | "uncertain" | "cancelled" | "done" | "dismissed";
   at: number; startedAt?: number; attempt: number; attemptId?: string; error?: string;
+  browserReference?: BrowserReference;
 };
 export type DeliveryState = {sessionId: string; cwd: string; revision: number; paused: boolean; busy: boolean; items: DeliveryRow[]};
 export type DeliveryEvent = {type: string; sessionId: string; cwd?: string; state?: DeliveryState; row?: DeliveryRow; method?: "prompt" | "interject"; ok?: boolean; cancelled?: boolean; error?: string};

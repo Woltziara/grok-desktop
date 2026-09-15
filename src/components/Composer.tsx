@@ -60,6 +60,7 @@ import {
   parseSoloLocalPath,
 } from "../lib/local-file-prompt";
 import type { PermissionMode } from "../lib/permission-mode";
+import type { BrowserReference } from "../lib/browser-reference";
 import type { ReasoningEffort } from "../lib/reasoning-effort";
 import {
   readDraft,
@@ -83,6 +84,7 @@ export type QueuedPrompt = {
   timelineText?: string;
   origin?: "user" | "followup";
   at: number;
+  browserReference?: BrowserReference;
 };
 
 export type ComposerSubmit = {
@@ -96,6 +98,7 @@ export type ComposerSubmit = {
   imageQuality?: "compact" | "high";
   timelineText?: string;
   origin?: "user" | "followup";
+  browserReference?: BrowserReference;
 };
 
 const COMPOSER_HEIGHT_KEY = "grok-desktop-composer-height";
@@ -173,6 +176,8 @@ export const Composer = memo(function Composer({
   focusNonce = 0,
   onQueueEdit,
   onQueueMove,
+  onQueueRefreshBrowserReference,
+  onQueueRemoveBrowserReference,
   knowledgeLabel = null,
   onOpenKnowledge,
 }: {
@@ -211,6 +216,8 @@ export const Composer = memo(function Composer({
   focusNonce?: number;
   onQueueEdit?: (id: string, text: string) => void;
   onQueueMove?: (id: string, dir: number) => void;
+  onQueueRefreshBrowserReference?: (id: string) => void;
+  onQueueRemoveBrowserReference?: (id: string) => void;
   knowledgeLabel?: string | null;
   onOpenKnowledge?: () => void;
 }) {
@@ -220,6 +227,7 @@ export const Composer = memo(function Composer({
   const [quotes, setQuotes] = useState<
     Array<{ id: string; text: string; sourceMessageId?: string }>
   >([]);
+  const [browserReference, setBrowserReference] = useState<BrowserReference | null>(null);
   const [highDetail, setHighDetail] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
@@ -248,6 +256,8 @@ export const Composer = memo(function Composer({
   filesRef.current = pendingFiles;
   const quotesRef = useRef(quotes);
   quotesRef.current = quotes;
+  const browserReferenceRef = useRef(browserReference);
+  browserReferenceRef.current = browserReference;
   const highDetailRef = useRef(highDetail);
   highDetailRef.current = highDetail;
   const promptQueueRef = useRef(promptQueue);
@@ -360,7 +370,8 @@ export const Composer = memo(function Composer({
   const captureDraft = useCallback((): SessionDraft => ({
     text: inputRef.current, textToken: textTokenRef.current, submission: submissionRef.current,
     cursor: textareaRef.current?.selectionStart ?? inputRef.current.length,
-    highDetail: highDetailRef.current, quotes: quotesRef.current, savedAt: Date.now(), cwd: draftLocation() || "",
+    highDetail: highDetailRef.current, quotes: quotesRef.current, browserReference: browserReferenceRef.current || undefined,
+    savedAt: Date.now(), cwd: draftLocation() || "",
     files: [...new Map([
       ...hydratingFilesRef.current.filter(f => !removedAttachmentIds.current.has(f.id)),
       ...imagesRef.current.map(imageRecord), ...filesRef.current.map(fileRecord),
@@ -380,7 +391,7 @@ export const Composer = memo(function Composer({
   useEffect(() => {
     const timer = window.setTimeout(persistCurrentDraft, 280);
     return () => { window.clearTimeout(timer); persistCurrentDraft(); };
-  }, [input, pendingImages, pendingFiles, quotes, highDetail, persistCurrentDraft]);
+  }, [input, pendingImages, pendingFiles, quotes, browserReference, highDetail, persistCurrentDraft]);
   useEffect(() => {
     window.addEventListener("grok-flush-draft", persistCurrentDraft);
     return () => { window.removeEventListener("grok-flush-draft", persistCurrentDraft); persistCurrentDraft(); };
@@ -440,6 +451,7 @@ export const Composer = memo(function Composer({
     inputRef.current = draft.text || ""; setInput(inputRef.current);
     highDetailRef.current = Boolean(draft.highDetail); setHighDetail(highDetailRef.current);
     quotesRef.current = normalizeComposerQuotes(draft.quotes); setQuotes(quotesRef.current);
+    browserReferenceRef.current = draft.browserReference || null; setBrowserReference(browserReferenceRef.current);
     hydratingFilesRef.current = draft.files || [];
     const token = textTokenRef.current;
     void restoreFiles(draft.files || []).then(() => {
@@ -468,8 +480,8 @@ export const Composer = memo(function Composer({
     imagesRef.current = imagesRef.current.filter(image => { if (retained.has(image.id)) return true; revokePendingImagePreview(image); return false; });
     filesRef.current = filesRef.current.filter(file => retained.has(file.id));
     hydratingFilesRef.current = hydratingFilesRef.current.filter(file => retained.has(file.id));
-    inputRef.current = next.text; quotesRef.current = next.quotes || []; highDetailRef.current = Boolean(next.highDetail); submissionRef.current = next.submission;
-    setInput(next.text); setPendingImages(imagesRef.current); setPendingFiles(filesRef.current); setQuotes(quotesRef.current); setHighDetail(highDetailRef.current);
+    inputRef.current = next.text; quotesRef.current = next.quotes || []; browserReferenceRef.current = next.browserReference || null; highDetailRef.current = Boolean(next.highDetail); submissionRef.current = next.submission;
+    setInput(next.text); setPendingImages(imagesRef.current); setPendingFiles(filesRef.current); setQuotes(quotesRef.current); setBrowserReference(browserReferenceRef.current); setHighDetail(highDetailRef.current);
     writeDraft(next);
   }, [captureDraft, draftLocation, sessionId, writeDraft]);
   useEffect(() => {
@@ -487,6 +499,17 @@ export const Composer = memo(function Composer({
     if (focusNonce) requestAnimationFrame(() => textareaRef.current?.focus());
   }, [focusNonce]);
   const clearDraft = useCallback(() => consumeSubmittedDraft(captureDraft()), [consumeSubmittedDraft, captureDraft]);
+  const addBrowserReference = useCallback(async () => {
+    if (!sessionId) { onError("请先开始一段对话，再引用浏览器。"); return; }
+    try {
+      const reference = await window.grokDesktop.captureBrowserReference(sessionId);
+      if (!mountedRef.current || reference.sessionId !== sessionId) return;
+      browserReferenceRef.current = reference;
+      setBrowserReference(reference);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    }
+  }, [onError, sessionId]);
 
   const addImages = useCallback(
     async (files: ArrayLike<Blob | File>) => {
@@ -772,6 +795,7 @@ export const Composer = memo(function Composer({
           mode,
           imageQuality,
           origin: "user",
+          browserReference: submitted.browserReference,
         });
         if (accepted) consumeSubmittedDraft(submitted);
       } finally {
@@ -1022,6 +1046,24 @@ export const Composer = memo(function Composer({
             ))}
           </div>
         )}
+        {browserReference ? (
+          <div className="composer-quotes" aria-label="浏览器引用">
+            <div className="composer-quote-chip" title={browserReference.displayUrl}>
+              <span className="composer-quote-chip__text">
+                @浏览器 · {browserReference.title || browserReference.displayUrl}
+              </span>
+              <button
+                type="button"
+                className="composer-quote-chip__x"
+                title="去掉浏览器引用"
+                aria-label="去掉浏览器引用"
+                onClick={() => setBrowserReference(null)}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        ) : null}
         {pendingFiles.length > 0 && (
           <div className="composer-files" aria-label="附件">
             {pendingFiles.map((file) => (
@@ -1133,10 +1175,16 @@ export const Composer = memo(function Composer({
                     />
                   ) : (
                     <span className="prompt-queue-text" title={q.text}>
-                      {q.text ||
+                      {q.browserReference ? "@浏览器 · " : ""}{q.text ||
                         `(${q.images.length} 张图)`}
                     </span>
                   )}
+                  {q.browserReference && !["sending", "interjecting", "interjected"].includes(q.status || "") ? (
+                    <>
+                      <button type="button" className="btn ghost btn-sm" title="用这段对话当前页替换已失效的浏览器引用" onClick={() => onQueueRefreshBrowserReference?.(q.id)}>重新引用</button>
+                      <button type="button" className="btn ghost btn-sm" title="保留原文，去掉浏览器引用" onClick={() => onQueueRemoveBrowserReference?.(q.id)}>去掉引用</button>
+                    </>
+                  ) : null}
                   <button
                     type="button"
                     className="btn ghost btn-sm"
@@ -1233,6 +1281,15 @@ export const Composer = memo(function Composer({
                 {knowledgeLabel || "工作认识"}
               </button>
             ) : null}
+            <button
+              type="button"
+              className="btn ghost btn-sm"
+              disabled={conn === "connecting"}
+              onClick={() => void addBrowserReference()}
+              title="引用这段对话当前打开的浏览器页面"
+            >
+              @浏览器
+            </button>
             <button
               type="button"
               className="btn ghost btn-sm"

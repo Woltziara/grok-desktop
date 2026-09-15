@@ -57,3 +57,10 @@ test("draft write failure is returned instead of swallowed", () => {
   assert.equal(result.ok, false);
   assert.match(String(result.error), /QuotaExceededError/);
 });
+
+test("a browser-only draft survives renderer storage instead of becoming an empty draft", () => {
+  const storage = memoryStorage();
+  const browserReference = {version:1,kind:"owned-preview",sessionId:"A",leaseId:"lease",pageId:"page",title:"Page",displayUrl:"https://example.test",capturedAt:1};
+  assert.equal(writeDraftRecord(storage, "/audit::A", {text:"",files:[],cwd:"/audit",savedAt:1,browserReference}).ok,true);
+  assert.deepEqual(readAllDraftRecords(storage)["/audit::A"].browserReference,browserReference);
+});

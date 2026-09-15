@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sanitizeDiagnostic } from "./log-sanitize.mjs";
 
 const nodeRequire = createRequire(import.meta.url);
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -58,7 +59,7 @@ function rotateIfNeeded(file) {
 }
 
 export function writeCrashLog(scope, message, data, file) {
-  const row = { t: new Date().toISOString(), pid: process.pid, scope: String(scope || "app"), msg: String(message || ""), ...(data && typeof data === "object" ? { data } : {}) };
+  const row = sanitizeDiagnostic({ t: new Date().toISOString(), pid: process.pid, scope: String(scope || "app"), msg: String(message || ""), ...(data && typeof data === "object" ? { data } : {}) });
   let line;
   try { line = `${JSON.stringify(row)}\n`; }
   catch { line = `${JSON.stringify({ t: row.t, pid: row.pid, scope: row.scope, msg: row.msg, data: { serialize: "failed" } })}\n`; }

@@ -2,6 +2,7 @@ import { assertContinuationSettled } from './continuation-pack.mjs';
 import { registerKnowledgeTransferIpc } from "./knowledge-transfer-ipc.mjs";
 import { createSessionDelivery, notifySessionDelivery } from "./session-delivery.mjs";
 import { registerDeliveryIpc } from "./delivery-ipc.mjs";
+import { captureBrowserReference, validateBrowserReference } from "./browser-reference.mjs";
 import { resolveMovedSessionCwd } from "./session-move.mjs";
 import { moveSessionFiles, withSessionMove, movableSessionClients, readSessionMoves, recoverSessionMoves } from "./session-move.mjs";
 import { applyWindowAgentAccess } from "./agent-access.mjs";
@@ -182,6 +183,7 @@ import {
   applyPreviewTheme,
   getPreviewWindow,
   openPreviewWindow,
+  previewPublicState,
   requestPreviewOpen,
   registerPreviewIpc,
   snapshotPreview,
@@ -859,6 +861,7 @@ function delivery() {
       }
     },
     canRelocate: (from, to, sid) => resolveMovedSessionCwd(from, sid) === to,
+    validateBrowserReference: (reference, client) => validateBrowserReference(reference, previewPublicState(), client.sessionId),
   });
 }
 
@@ -918,7 +921,12 @@ async function afterLaunchSession(ws, result) {
 
 function registerIpc() {
   registerKnowledgeTransferIpc(ipcMain, {dialog, windowFromEvent: e => BrowserWindow.fromWebContents(e.sender)});
-  registerDeliveryIpc(ipcMain, { sessionFromEvent, agentForSession, delivery });
+  registerDeliveryIpc(ipcMain, {
+    sessionFromEvent,
+    agentForSession,
+    delivery,
+    captureBrowserReference: sessionId => captureBrowserReference(previewPublicState(), sessionId),
+  });
   registerContinuationIpc(ipcMain, {
     home:grokHomeDir, userData:()=>app.getPath("userData"), dialog,
     windowFromEvent:e=>BrowserWindow.fromWebContents(e.sender),

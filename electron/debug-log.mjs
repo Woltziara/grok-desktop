@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { sanitizeDiagnostic } from "./log-sanitize.mjs";
 
 /** @type {boolean} */
 let enabled = false;
@@ -86,12 +87,12 @@ function rotateIfNeeded(file) {
 export function debugLog(scope, message, data) {
   if (!isDebugLogging()) return;
   const file = ensurePath();
-  const row = {
+  const row = sanitizeDiagnostic({
     t: new Date().toISOString(),
     scope: String(scope || "app"),
     msg: String(message || ""),
     ...(data && typeof data === "object" ? { data } : {}),
-  };
+  });
   const line = `${JSON.stringify(row)}\n`;
   try {
     rotateIfNeeded(file);
@@ -105,7 +106,7 @@ export function debugLog(scope, message, data) {
   }
   // Also mirror to main console when enabled (DevTools / terminal)
   try {
-    console.log(`[desktop-debug][${scope}] ${message}`, data ?? "");
+    console.log(`[desktop-debug][${row.scope}] ${row.msg}`, row.data ?? "");
   } catch {
     /* ignore */
   }

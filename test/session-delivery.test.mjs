@@ -119,6 +119,58 @@ test('two accepts before the first IPC turn starts preserve the first submission
   assert.equal(a.calls[0].text,'first');a.complete();await waitFor(()=>a.calls.length===2);assert.equal(a.calls[1].text,'second');a.complete();await tick();
 });
 
+test('browser reference survives the outbox and is revalidated immediately before delivery',async t=>{
+  let currentPage='page-1';
+  const {service}=fixture(t,{validateBrowserReference(ref){if(ref&&ref.pageId!==currentPage)throw new Error('引用的浏览器页面已经跳转，请重新点 @浏览器');}});
+  const a=new Peer('session-A'),ref={version:1,kind:'owned-preview',sessionId:'session-A',leaseId:'lease-1',pageId:'page-1',title:'Page',displayUrl:'https://example.test',capturedAt:1};
+  service.submit(a,{...input('inspect page','browser-send','queue'),browserReference:ref});
+  assert.deepEqual(service.state('session-A').items[0].browserReference,ref);
+  currentPage='page-2';service.mutate('session-A','resume');
+  await waitFor(()=>service.state('session-A').items[0].status==='failed');
+  assert.equal(a.calls.length,0);assert.match(service.state('session-A').items[0].error,/重新点 @浏览器/);
+});
+
+test('browser context is opt-in and travels outside the stored user text',async t=>{
+  const {service}=fixture(t,{validateBrowserReference:ref=>ref}),a=new Peer('session-A');
+  const ref={version:1,kind:'owned-preview',sessionId:'session-A',leaseId:'lease-1',pageId:'page-1',title:'Page',displayUrl:'https://example.test',capturedAt:1};
+  service.submit(a,{...input('with browser','with-browser'),browserReference:ref});await waitFor(()=>a.calls.length===1);
+  assert.equal(a.calls[0].text,'with browser');assert.deepEqual(a.calls[0].opts.browserReference,ref);
+  a.complete();await waitFor(()=>!service.state('session-A').busy);
+  service.submit(a,input('plain prompt','plain'));await waitFor(()=>a.calls.length===2);
+  assert.equal(a.calls[1].opts.browserReference,undefined);a.complete();await tick();
+});
+
+test('a failed browser row can refresh or remove only its reference while preserving user text',async t=>{
+  const {service}=fixture(t,{validateBrowserReference:ref=>{if(ref?.leaseId==='old')throw new Error('stale browser');return ref;}}),a=new Peer('session-A');
+  const oldRef={version:1,kind:'owned-preview',sessionId:'session-A',leaseId:'old',pageId:'old',title:'Old',displayUrl:'https://old.test',capturedAt:1};
+  const newRef={...oldRef,leaseId:'new',pageId:'new',title:'New',displayUrl:'https://new.test'};
+  service.submit(a,{...input('keep my exact words','refresh-row'),browserReference:oldRef});
+  await waitFor(()=>service.state('session-A').items[0]?.status==='failed');
+  assert.equal(a.calls.length,0);
+  service.mutate('session-A','refresh-browser-reference',{id:'refresh-row',browserReference:newRef});
+  let row=service.state('session-A').items[0];assert.equal(row.text,'keep my exact words');assert.deepEqual(row.browserReference,newRef);
+  service.mutate('session-A','remove-browser-reference',{id:'refresh-row'});row=service.state('session-A').items[0];
+  assert.equal(row.text,'keep my exact words');assert.equal(row.browserReference,undefined);
+});
+
+test('changing browser references cannot silently replay uncertain or cancelled requests',async t=>{
+  for (const expected of ['uncertain','cancelled']) {
+    const {service}=fixture(t,{validateBrowserReference:ref=>ref}),a=new Peer('session-A');
+    const ref={version:1,kind:'owned-preview',sessionId:'session-A',leaseId:'lease-1',pageId:'page-1',displayUrl:'https://example.test'};
+    service.submit(a,{...input('preserve result boundary','boundary'),browserReference:ref});
+    await waitFor(()=>a.calls.length===1);
+    if(expected==='uncertain')a.reject(new Error('connection closed'));else service.stop('session-A');
+    await waitFor(()=>service.state('session-A').items[0]?.status===expected);
+    service.mutate('session-A','refresh-browser-reference',{id:'boundary',browserReference:{...ref,pageId:'page-2'}});
+    assert.equal(service.state('session-A').items[0].status,expected);
+    service.mutate('session-A','remove-browser-reference',{id:'boundary'});
+    assert.equal(service.state('session-A').items[0].status,expected);
+    service.mutate('session-A','resume');await tick();
+    assert.equal(a.calls.length,1);
+    assert.throws(()=>service.mutate('session-A','retry',{id:'boundary'}),/明确确认/);
+  }
+});
+
 test('real interject rejection pauses without enqueue fallback or cancelling a live parent',async t=>{
   const {service}=fixture(t),a=new Peer('session-A');a.interject=async()=>{throw Object.assign(new Error('permission denied'),{code:-32003});};
   service.submit(a,input('first'));await tick();service.submit(a,input('correction'));await tick();

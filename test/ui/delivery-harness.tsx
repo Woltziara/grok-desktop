@@ -20,7 +20,7 @@ function Harness({paths}:{paths:Record<string,string>}) {
   return <AppTooltipProvider><div><button onClick={()=>change('delivery-session-A')}>会话 A</button><button onClick={()=>change('delivery-session-B')}>会话 B</button>
     <output id="selected">{selected}</output><output id="connection">{conn}</output><pre id="error">{error}</pre><pre id="transcript">{JSON.stringify(items)}</pre>
     <Composer key={selected} conn={conn} projectOpen={true} commands={[]} promptQueue={delivery.promptQueue} outboxPaused={delivery.outboxPaused} onResumeQueue={delivery.resumeQueue}
-      onSubmit={delivery.submitFromComposer} onStop={delivery.stopTurn} onLocalCommand={noop} onSendQueuedNow={delivery.sendQueuedNow} onRemoveQueued={delivery.removeQueued} onQueueEdit={delivery.editQueued} onQueueMove={delivery.moveQueued} onError={setError}
+      onSubmit={delivery.submitFromComposer} onStop={delivery.stopTurn} onLocalCommand={noop} onSendQueuedNow={delivery.sendQueuedNow} onRemoveQueued={delivery.removeQueued} onQueueEdit={delivery.editQueued} onQueueMove={delivery.moveQueued} onQueueRefreshBrowserReference={delivery.refreshQueuedBrowserReference} onQueueRemoveBrowserReference={delivery.removeQueuedBrowserReference} onError={setError}
       sessionCwd={paths[selected]} sessionId={selected}/></div></AppTooltipProvider>;
 }
 bridge.info().then((paths:Record<string,string>)=>createRoot(document.getElementById('root')!).render(<Harness paths={paths}/>));

@@ -1,7 +1,7 @@
 /** Shared by production main and Electron integration tests. Never resolve a missing
  * owner from the currently focused conversation for a delayed composer request. */
 import { isSafeSessionId } from './sessions.mjs';
-export function registerDeliveryIpc(ipc, { sessionFromEvent, agentForSession, delivery }) {
+export function registerDeliveryIpc(ipc, { sessionFromEvent, agentForSession, delivery, captureBrowserReference }) {
   function target(event, sessionId, requireAgent = true) {
     if (!isSafeSessionId(sessionId)) throw new Error('发送没有明确的对话归属，草稿仍保留。');
     const ws = sessionFromEvent(event);
@@ -24,6 +24,11 @@ export function registerDeliveryIpc(ipc, { sessionFromEvent, agentForSession, de
   ipc.handle('agent:outbox-mutate', async (event, { sessionId, action, data } = {}) => {
     const client = target(event, sessionId);
     delivery().bind(client);
+    if (action === 'refresh-browser-reference') data = { ...(data || {}), browserReference: captureBrowserReference(sessionId) };
     return delivery().mutate(sessionId, action, data);
+  });
+  ipc.handle('preview:reference', async (event, sessionId) => {
+    target(event, sessionId);
+    return captureBrowserReference(sessionId);
   });
 }

@@ -54,9 +54,18 @@ assert.deepEqual(seen.request, [
 ]);
 assert.equal(seen.consume.length, 1);
 assert.equal(seen.consume[0].assistantText, "finished answer");
+const browserReference = {
+  version: 1, kind: "owned-preview", sessionId: "s1", leaseId: "lease-1",
+  pageId: "page-1", title: "Example", displayUrl: "https://example.test/path", capturedAt: 1,
+};
+await client.prompt("inspect this page", { browserReference });
+assert.equal(seen.prepare[1].text, "inspect this page");
+assert.equal(seen.request[1].params.prompt[0].text, "inspect this page\\nWK-BRIEF");
+assert.match(seen.request[1].params.prompt[1].text, /机器上下文，不是用户原话/);
+assert.equal(seen.request[1].params._meta["grok-desktop/browser-reference"].pageId, "page-1");
 client.enqueueScheduledPrompt({ prompt: "scheduled text" });
 await new Promise((resolve) => setImmediate(resolve));
-assert.deepEqual(seen.prepare[1], {
+assert.deepEqual(seen.prepare[2], {
   text: "scheduled text",
   sessionId: "s1",
   cwd: "/repo",

@@ -1,7 +1,9 @@
 /** Identity based reconciliation: a slow receipt must not erase later typing,
  * newly attached files or quotes, even if the visible text happens to match. */
 export function draftFingerprint(draft) {
-  return JSON.stringify([draft.text, draft.textToken, Boolean(draft.highDetail), (draft.files || []).map(f => f.id), (draft.quotes || []).map(q => [q.id, q.text])]);
+  const parts = [draft.text, draft.textToken, Boolean(draft.highDetail), (draft.files || []).map(f => f.id), (draft.quotes || []).map(q => [q.id, q.text])];
+  if (draft.browserReference) parts.push(draft.browserReference);
+  return JSON.stringify(parts);
 }
 export function appendDraftFiles(draft, files) {
   const byId = new Map((draft.files || []).map(file => [file.id, file]));
@@ -21,6 +23,9 @@ export function subtractSubmittedDraft(current, submitted) {
       return !sent || JSON.stringify(sent) !== JSON.stringify(file) || (file.kind === 'image' && current.highDetail !== submitted.highDetail);
     }),
     quotes: (current.quotes || []).filter(q => sentQuotes.get(q.id) !== q.text),
+    browserReference: JSON.stringify(current.browserReference || null) === JSON.stringify(submitted.browserReference || null)
+      ? undefined
+      : current.browserReference,
   };
   if (next.submission?.id === submitted.submission?.id) delete next.submission;
   if (!next.files.some(f => f.kind === 'image')) next.highDetail = false;

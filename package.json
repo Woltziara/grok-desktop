@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "1.4.2-unified.1",
+  "version": "1.4.2-unified.2",
   "description": "Desktop GUI for the Grok Build coding agent (Electron + ACP)",
   "main": "electron/main.mjs",
   "type": "module",
@@ -49,12 +49,12 @@
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",
     "concurrently": "^9.1.2",
-    "electron": "^35.2.1",
+    "electron": "44.3.0",
     "electron-builder": "^26.0.12",
+    "plist": "^3.1.0",
     "typescript": "^5.8.3",
     "vite": "^6.3.3",
-    "wait-on": "^8.0.3",
-    "plist": "^3.1.0"
+    "wait-on": "^8.0.3"
   },
   "build": {
     "appId": "com.karman.grok-desktop",

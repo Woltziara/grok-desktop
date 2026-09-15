@@ -23,6 +23,7 @@ export function hasDraftContent(draft) {
   if (Array.isArray(draft.files) && draft.files.length > 0) return true;
   if (Array.isArray(draft.images) && draft.images.length > 0) return true;
   if (Array.isArray(draft.quotes) && draft.quotes.length > 0) return true;
+  if (draft.browserReference && typeof draft.browserReference === "object") return true;
   return false;
 }
 

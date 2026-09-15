@@ -19,6 +19,7 @@ import {
   prependProjectOrder,
   stableProjectOrder,
 } from "../../shared/workspace-org.mjs";
+import type { BrowserReference } from "./browser-reference";
 
 export type DraftFile = {
   id: string;
@@ -42,6 +43,7 @@ export type SessionDraft = {
   highDetail?: boolean;
   files: DraftFile[];
   quotes?: Array<{ id: string; text: string; sourceMessageId?: string }>;
+  browserReference?: BrowserReference;
   savedAt: number;
   cwd: string;
   title?: string;

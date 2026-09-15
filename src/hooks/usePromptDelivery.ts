@@ -125,6 +125,8 @@ export function usePromptDelivery(opts: {
   const removeQueued = useCallback((id: string) => { void mutate("remove", { id }); }, [mutate]);
   const moveQueued = useCallback((id: string, direction: number) => { void mutate("move", { id, direction }); }, [mutate]);
   const editQueued = useCallback((id: string, text: string) => { void mutate("edit", { id, text }); }, [mutate]);
+  const refreshQueuedBrowserReference = useCallback((id: string) => { void mutate("refresh-browser-reference", { id }); }, [mutate]);
+  const removeQueuedBrowserReference = useCallback((id: string) => { void mutate("remove-browser-reference", { id }); }, [mutate]);
   const resumeQueue = useCallback(() => { void mutate("resume"); }, [mutate]);
   const sendQueuedNow = useCallback((id?: string) => {
     const item = id ? promptQueueRef.current.find(i => i.id === id) : promptQueueRef.current[0];
@@ -152,5 +154,5 @@ export function usePromptDelivery(opts: {
     void submitFromComposer({ ...parsed.submit, sessionId: payload.sessionId }).then(ok => { if (!ok && visible(payload.sessionId)) v.setError(previewCaptureRefuseError(v.project)); });
   }), [submitFromComposer, visible]);
 
-  return { promptQueue, promptQueueRef, sendNowRef, afterTurnRef, outboxPaused, resumeQueue, clearPromptQueue, removeQueued, submitFromComposer, queueNextPrompt, sendQueuedNow, stopTurn, moveQueued, editQueued };
+  return { promptQueue, promptQueueRef, sendNowRef, afterTurnRef, outboxPaused, resumeQueue, clearPromptQueue, removeQueued, submitFromComposer, queueNextPrompt, sendQueuedNow, stopTurn, moveQueued, editQueued, refreshQueuedBrowserReference, removeQueuedBrowserReference };
 }

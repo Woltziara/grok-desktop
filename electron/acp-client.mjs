@@ -28,6 +28,7 @@ import { extractChunkText } from "../shared/session-timeline.mjs";
 import { issuePreviewScope, revokePreviewScope } from "./preview-ownership.mjs";
 import { desktopPreviewMcpServers } from "./preview-mcp.mjs";
 import { PREVIEW_SESSION_RULE } from "./preview-mcp-protocol.mjs";
+import { browserReferenceMachineText, browserReferenceMeta } from "./browser-reference.mjs";
 import {
 
   initializeClientMeta,
@@ -1702,7 +1703,7 @@ export class GrokAcpClient extends EventEmitter {
    *   interjectionId?: string,
    * }} [opts]
    */
-  async interject(text, { images = [], imageQuality = "compact", interjectionId } = {}) {
+  async interject(text, { images = [], imageQuality = "compact", interjectionId, browserReference } = {}) {
     if (!this.sessionId) throw new Error("No ACP session");
     const turn = this._activeTurn;
     if (!this.turnOpen || !turn || turn.cancelled || turn.finishing) {
@@ -1719,7 +1720,7 @@ export class GrokAcpClient extends EventEmitter {
     // Durably record before calling ACP. Failure/cancel leaves the original pending.
     const capture = this._promptLifecycle.captureInterjection || captureWorkingKnowledgeInterjection;
     const row = capture({ text: String(text || ""), interjectionId: id, turn });
-    const promise = this._sendInterjection(text, { images, imageQuality, interjectionId: id }).then((result) => {
+    const promise = this._sendInterjection(text, { images, imageQuality, interjectionId: id, browserReference }).then((result) => {
       if (result?.ok && !turn.cancelled && row?.id && !turn.inboxIds.includes(row.id)) turn.inboxIds.push(row.id);
       return result;
     });
@@ -1730,7 +1731,7 @@ export class GrokAcpClient extends EventEmitter {
     catch (err) { this._interjectionCalls.delete(id); throw err; }
   }
 
-  async _sendInterjection(text, { images = [], imageQuality = "compact", interjectionId } = {}) {
+  async _sendInterjection(text, { images = [], imageQuality = "compact", interjectionId, browserReference } = {}) {
     if (!this.sessionId) throw new Error("No ACP session");
     const trimmed = String(text || "").trim();
     const list = Array.isArray(images) ? images : [];
@@ -1744,12 +1745,16 @@ export class GrokAcpClient extends EventEmitter {
     }
     const id =
       String(interjectionId || "").trim() || crypto.randomUUID();
+    const machine = browserReferenceMachineText(browserReference);
     const attempts = interjectAttempts({
       sessionId: this.sessionId,
-      text: trimmed,
+      text: machine ? `${trimmed}\n\n${machine}` : trimmed,
       interjectionId: id,
       images: compressed,
     });
+    for (const attempt of attempts) if (browserReference) {
+      attempt.params._meta = { ...(attempt.params._meta || {}), "grok-desktop/browser-reference": browserReferenceMeta(browserReference) };
+    }
     const misses = [];
     for (const attempt of attempts) {
       try {
@@ -1821,7 +1826,7 @@ export class GrokAcpClient extends EventEmitter {
     return this._restartPromise;
   }
 
-  async prompt(text, { images = [], imageQuality = "compact", origin = "user" } = {}) {
+  async prompt(text, { images = [], imageQuality = "compact", origin = "user", browserReference } = {}) {
     if (this._needsPromptRestart) await this._resumeAfterCancellation();
     if (!this.sessionId) throw new Error("No ACP session");
     assertSessionNotMoving(this.sessionId);
@@ -1830,6 +1835,8 @@ export class GrokAcpClient extends EventEmitter {
     const cwd = this.cwd;
     const prepared = this._promptLifecycle.prepare({ text, sessionId, cwd, origin });
     const { wrapped, prompt } = prepared;
+    const machine = browserReferenceMachineText(browserReference);
+    if (machine) prompt.push({ type: "text", text: machine });
     for (const img of images) {
       const compressed = compressPromptImage(img, imageQuality);
       prompt.push({ type: "image", data: compressed.data, mimeType: compressed.mimeType || "image/png" });
@@ -1848,7 +1855,11 @@ export class GrokAcpClient extends EventEmitter {
     this._turnObjectId = turn.objectId;
     let completed = false;
     try {
-      const result = await this.request("session/prompt", { sessionId, prompt }, { timeoutMs: 30 * 60_000 });
+      const result = await this.request("session/prompt", {
+        sessionId,
+        prompt,
+        ...(browserReference ? { _meta: { "grok-desktop/browser-reference": browserReferenceMeta(browserReference) } } : {}),
+      }, { timeoutMs: 30 * 60_000 });
       if (this._activeTurn !== turn || turn.cancelled) throw new Error("cancelled");
       turn.finishing = true;
       await Promise.allSettled(turn.interjections || []);

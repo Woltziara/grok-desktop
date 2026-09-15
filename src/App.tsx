@@ -386,6 +386,8 @@ export default function App() {
     stopTurn,
     moveQueued,
     editQueued,
+    refreshQueuedBrowserReference,
+    removeQueuedBrowserReference,
   } = usePromptDelivery({
     project,
     sessionIdRef,
@@ -2207,6 +2209,8 @@ export default function App() {
             onRemoveQueued={removeQueued}
             onQueueEdit={editQueued}
             onQueueMove={moveQueued}
+            onQueueRefreshBrowserReference={refreshQueuedBrowserReference}
+            onQueueRemoveBrowserReference={removeQueuedBrowserReference}
             onError={onComposerError}
             sessionCwd={project}
             sessionId={sessionId}

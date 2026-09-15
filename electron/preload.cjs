@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   submitDelivery: (input) => ipcRenderer.invoke("agent:submit-delivery", input),
   listOutbox: (sessionId) => ipcRenderer.invoke("agent:outbox", sessionId),
   mutateOutbox: (sessionId, action, data) => ipcRenderer.invoke("agent:outbox-mutate", { sessionId, action, data }),
+  captureBrowserReference: (sessionId) => ipcRenderer.invoke("preview:reference", sessionId),
   cancel: (sessionId) => ipcRenderer.invoke("agent:cancel", sessionId),
   compact: (hint, sessionId) => ipcRenderer.invoke("agent:compact", hint || "", sessionId),
   rewind: (targetPromptIndex, restoreFiles) =>
@@ -159,6 +160,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
     ipcRenderer.invoke("preview:open", url ? { url } : {}),
   closePreview: () => ipcRenderer.invoke("preview:close"),
   previewState: () => ipcRenderer.invoke("preview:state"),
+  navigatePreview: (url) => ipcRenderer.invoke("preview:navigate", url),
   previewSnapshot: () => ipcRenderer.invoke("preview:snapshot"),
 
   getAuthStatus: () => ipcRenderer.invoke("auth:status"),
