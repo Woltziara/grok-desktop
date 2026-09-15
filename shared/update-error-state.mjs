@@ -3,7 +3,8 @@ export function createInteractiveUpdateOperation() {
 }
 
 /** The check caller owns synchronous check errors; later updater errors show now. */
-export function shouldShowUpdaterError(operation) {
+export function shouldShowUpdaterError(operation, backgroundCheckPending = false) {
+  if (backgroundCheckPending && !operation) return false;
   if (operation?.phase === "check") return false;
   if (operation?.phase === "download") operation.dialogShown = true;
   return true;

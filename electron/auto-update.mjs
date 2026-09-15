@@ -42,6 +42,7 @@ let installStarting = false;
 let lastDownloadedUpdate = null;
 /** @type {{ phase: "check" | "download" | "done", dialogShown: boolean } | null} */
 let interactiveUpdate = null;
+let backgroundCheckPending = false;
 /** Settings → Preview updates. Default off so team installers stay on stable. */
 let allowPrereleasePref = false;
 
@@ -250,7 +251,7 @@ function ensureWired(hooks = {}) {
   autoUpdater.on("error", (err) => {
     busy = false;
     console.warn("[auto-update]", err?.message || err);
-    if (!shouldShowUpdaterError(interactiveUpdate)) return;
+    if (!shouldShowUpdaterError(interactiveUpdate, backgroundCheckPending)) return;
     void showUpdateError(err);
   });
 
@@ -342,6 +343,7 @@ export function setupAutoUpdater(hooks = {}) {
   autoUpdater.allowPrerelease = allowPrereleasePref;
 
   setTimeout(() => {
+    backgroundCheckPending = true;
     checkForUpdatesWithRetry(autoUpdater, { attempts: 3, delayMs: 2000 }).catch(
       (err) => {
         console.warn(
@@ -349,7 +351,7 @@ export function setupAutoUpdater(hooks = {}) {
           err?.message || err,
         );
       },
-    );
+    ).finally(() => { backgroundCheckPending = false; });
   }, 5000);
 }
 

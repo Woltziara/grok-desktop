@@ -94,6 +94,14 @@ test("interactive download rejection is surfaced once after check errors were de
   assert.equal(operation.phase, "done");
 });
 
+test("startup checks stay quiet without suppressing user-initiated download failures", () => {
+  assert.equal(shouldShowUpdaterError(null, true), false);
+  const download = { phase: "download", dialogShown: false };
+  assert.equal(shouldShowUpdaterError(download, true), true);
+  assert.equal(download.dialogShown, true);
+  assert.equal(shouldShowUpdaterError(null, false), true);
+});
+
 test("download promise does not duplicate an error already owned by the updater event", async () => {
   const operation = createInteractiveUpdateOperation();
   let rejectDownload;
