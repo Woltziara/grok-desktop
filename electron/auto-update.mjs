@@ -8,22 +8,25 @@
  *
  * macOS: builds are ad-hoc signed (unsigned for distribution). Electron’s
  * Squirrel.Mac / ShipIt path often quits the app without replacing the
- * bundle. We install by unzipping the downloaded zip into the .app path
- * via a detached helper script, then relaunch.
+ * bundle. We verify and stage the downloaded zip while the app remains open;
+ * a detached helper replaces the bundle only after this process exits.
  */
 import { createRequire } from "node:module";
-import { execFileSync, spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { app, dialog, BrowserWindow } from "electron";
 import {
+  prepareMacUpdateInstall,
+  runMacInstallTransaction,
+} from "./mac-update-install.mjs";
+import {
   UPDATE_RELEASES_URL,
   formatUpdateCheckError,
-  macBundleIdFromPlistXml,
-  pickMacUpdateZip,
-  updateReceiptFromDownload,
 } from "../shared/update-identity.mjs";
+import {
+  createInteractiveUpdateOperation,
+  shouldShowUpdaterError,
+  watchInteractiveDownload,
+} from "../shared/update-error-state.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -34,9 +37,11 @@ let wired = false;
 let busy = false;
 /** True while we are forcing quit to install an update */
 let quittingForUpdate = false;
-/** @type {import('electron-updater').UpdateInfo | null} */
+let installStarting = false;
+/** @type {import('electron-updater').UpdateDownloadedEvent | null} */
 let lastDownloadedUpdate = null;
-let suppressErrorDialog = false;
+/** @type {{ phase: "check" | "download" | "done", dialogShown: boolean } | null} */
+let interactiveUpdate = null;
 /** Settings → Preview updates. Default off so team installers stay on stable. */
 let allowPrereleasePref = false;
 
@@ -134,335 +139,91 @@ function macAppBundlePath() {
   return path.resolve(path.dirname(process.execPath), "..", "..");
 }
 
-/**
- * Locate the zip electron-updater already downloaded.
- * @param {import('electron-updater').AppUpdater | null} [autoUpdater]
- * @returns {string | null}
- */
-function resolveMacUpdateZip(autoUpdater) {
-  try {
-    const file = autoUpdater?.downloadedUpdateHelper?.file;
-    if (!file || !fs.existsSync(file)) return null;
-    const receipt = updateReceiptFromDownload(lastDownloadedUpdate);
-    return pickMacUpdateZip({
-      downloadedFile: file,
-      size: fs.statSync(file).size,
-      updateVersion: receipt.version,
-      sha512Receipt: receipt.sha512Receipt,
-    });
-  } catch {
-    return null;
-  }
-}
-
-function readPlistXml(appPath) {
-  const plistPath = path.join(appPath, "Contents", "Info.plist");
-  try {
-    return execFileSync("plutil", ["-convert", "xml1", "-o", "-", plistPath], {
-      encoding: "utf8",
-    });
-  } catch {
-    return fs.readFileSync(plistPath, "utf8");
-  }
-}
-
-function currentMacBundleId(appPath) {
-  try {
-    return macBundleIdFromPlistXml(readPlistXml(appPath));
-  } catch {
-    return "";
-  }
-}
-
-/**
- * macOS: Squirrel.Mac does not reliably install ad-hoc/unsigned builds.
- * Unzip the downloaded update over the running .app via a detached script
- * that waits for this process to exit, then relaunches.
- *
- * @param {import('electron-updater').AppUpdater} autoUpdater
- * @returns {boolean} true if helper was launched
- */
-function startMacManualInstall(autoUpdater) {
-  const zipPath = resolveMacUpdateZip(autoUpdater);
-  const appPath = macAppBundlePath();
-  const expectedBundleId = currentMacBundleId(appPath);
-  const receipt = updateReceiptFromDownload(lastDownloadedUpdate);
-  const expectedVersion = receipt.version;
-  const expectedArch = receipt.arch || process.arch;
-  if (!expectedBundleId || !expectedVersion || !expectedArch) {
-    console.warn("[auto-update] mac manual install: missing identity", {
-      expectedBundleId,
-      expectedVersion,
-      expectedArch,
-    });
-    return false;
-  }
-
-  if (!zipPath) {
-    console.warn("[auto-update] mac manual install: no verified update.zip found");
-    return false;
-  }
-  if (!appPath.endsWith(".app") || !fs.existsSync(appPath)) {
-    console.warn("[auto-update] mac manual install: bad app path:", appPath);
-    return false;
-  }
-
-  // Refuse to write outside a .app we own / can write (best-effort check)
-  try {
-    fs.accessSync(path.dirname(appPath), fs.constants.W_OK);
-  } catch (err) {
-    console.warn(
-      "[auto-update] mac manual install: app parent not writable:",
-      err?.message || err,
-    );
-    return false;
-  }
-
-  const logPath = path.join(
-    os.homedir(),
-    "Library",
-    "Logs",
-    "grok-desktop-update.log",
-  );
-  const scriptPath = path.join(
-    os.tmpdir(),
-    `grok-desktop-update-${process.pid}-${Date.now()}.sh`,
-  );
-
-  // Bash helper: wait for PID, extract zip, replace .app, clear quarantine, open.
-  // Paths are passed as argv so we do not interpolate untrusted content into the script body.
-  const script = `#!/bin/bash
-set -u
-LOG="$1"
-APP_PID="$2"
-ZIP="$3"
-DEST="$4"
-APP_NAME="$(basename "$DEST")"
-EXPECTED_BUNDLE_ID="$5"
-EXPECTED_VERSION="$6"
-EXPECTED_ARCH="$7"
-
-mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-exec >>"$LOG" 2>&1
-echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) mac update helper ===="
-echo "pid=$APP_PID zip=$ZIP dest=$DEST bundle=$EXPECTED_BUNDLE_ID version=$EXPECTED_VERSION arch=$EXPECTED_ARCH"
-
-if [ -z "$EXPECTED_BUNDLE_ID" ] || [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_ARCH" ]; then
-  echo "ERROR: missing expected identity; not replacing"
-  exit 1
-fi
-
-# Wait for the Electron process to exit (max ~90s). Timeout must not replace.
-exited=0
-for i in $(seq 1 180); do
-  if ! kill -0 "$APP_PID" 2>/dev/null; then
-    echo "app exited after \${i} polls"
-    exited=1
-    break
-  fi
-  sleep 0.5
-done
-if [ "$exited" -ne 1 ]; then
-  echo "ERROR: app still running after wait; not replacing"
-  exit 1
-fi
-sleep 1
-
-if [ ! -f "$ZIP" ]; then
-  echo "ERROR: zip missing: $ZIP"
-  exit 1
-fi
-
-TMP="$(mktemp -d /tmp/grok-desktop-update.XXXXXX)"
-cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
-
-echo "extracting…"
-if command -v ditto >/dev/null 2>&1; then
-  ditto -x -k "$ZIP" "$TMP" || { echo "ditto failed"; exit 1; }
-else
-  unzip -q "$ZIP" -d "$TMP" || { echo "unzip failed"; exit 1; }
-fi
-
-NEW_APP="$TMP/$APP_NAME"
-if [ ! -d "$NEW_APP" ]; then
-  NEW_APP="$(find "$TMP" -maxdepth 2 -name '*.app' -type d 2>/dev/null | head -1)"
-fi
-if [ -z "\${NEW_APP:-}" ] || [ ! -d "$NEW_APP" ]; then
-  echo "ERROR: no .app inside zip"
-  ls -la "$TMP" || true
-  exit 1
-fi
-echo "new app: $NEW_APP"
-
-ACTUAL_BUNDLE_ID="$(defaults read "$NEW_APP/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
-ACTUAL_VERSION="$(defaults read "$NEW_APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)"
-EXEC_BIN="$(/usr/bin/find "$NEW_APP/Contents/MacOS" -type f -perm +111 2>/dev/null | /usr/bin/head -1)"
-ACTUAL_ARCH="$(lipo -archs "$EXEC_BIN" 2>/dev/null || uname -m)"
-if [ -z "$ACTUAL_BUNDLE_ID" ] || [ -z "$ACTUAL_VERSION" ] || [ -z "$ACTUAL_ARCH" ]; then
-  echo "ERROR: could not read new app identity; not replacing"
-  exit 1
-fi
-if [ "$ACTUAL_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
-  echo "ERROR: bundle id mismatch expected=$EXPECTED_BUNDLE_ID actual=$ACTUAL_BUNDLE_ID"
-  exit 1
-fi
-if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
-  echo "ERROR: version mismatch expected=$EXPECTED_VERSION actual=$ACTUAL_VERSION"
-  exit 1
-fi
-ARCH_OK=0
-if [ "$EXPECTED_ARCH" = "arm64" ] || [ "$EXPECTED_ARCH" = "aarch64" ]; then
-  case " $ACTUAL_ARCH " in *" arm64 "*) ARCH_OK=1 ;; esac
-else
-  case " $ACTUAL_ARCH " in *" x86_64 "*|*" x64 "*) ARCH_OK=1 ;; esac
-fi
-if [ "$ARCH_OK" -ne 1 ]; then
-  echo "ERROR: arch mismatch expected=$EXPECTED_ARCH actual=$ACTUAL_ARCH"
-  exit 1
-fi
-
-# Replace in place (rename old aside, then move new; restore on failure)
-BACKUP="\${DEST}.pre-update"
-rm -rf "$BACKUP" 2>/dev/null || true
-if [ -d "$DEST" ]; then
-  if ! mv "$DEST" "$BACKUP"; then
-    echo "ERROR: could not move old app aside (permission?)"
-    exit 1
-  fi
-fi
-
-if command -v ditto >/dev/null 2>&1; then
-  if ! ditto "$NEW_APP" "$DEST"; then
-    echo "ERROR: ditto install failed — restoring backup"
-    rm -rf "$DEST" 2>/dev/null || true
-    [ -d "$BACKUP" ] && mv "$BACKUP" "$DEST"
-    exit 1
-  fi
-else
-  if ! mv "$NEW_APP" "$DEST"; then
-    echo "ERROR: mv install failed — restoring backup"
-    [ -d "$BACKUP" ] && mv "$BACKUP" "$DEST"
-    exit 1
-  fi
-fi
-
-# Keep the previous bundle until the new app actually launches.
-xattr -cr "$DEST" 2>/dev/null || true
-
-echo "launching $DEST"
-if ! open "$DEST"; then
-  echo "open failed — restoring backup"
-  rm -rf "$DEST" 2>/dev/null || true
-  [ -d "$BACKUP" ] && mv "$BACKUP" "$DEST"
-  exit 1
-fi
-echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) launched; backup kept at $BACKUP ===="
-`;
-
-  try {
-    fs.writeFileSync(scriptPath, script, { encoding: "utf8", mode: 0o755 });
-  } catch (err) {
-    console.warn(
-      "[auto-update] could not write update helper:",
-      err?.message || err,
-    );
-    return false;
-  }
-
-  console.log(
-    "[auto-update] mac manual install:",
-    "zip=",
-    zipPath,
-    "app=",
-    appPath,
-    "log=",
-    logPath,
-  );
-
-  try {
-    const child = spawn(
-      "/bin/bash",
-      [scriptPath, logPath, String(process.pid), zipPath, appPath, expectedBundleId, expectedVersion, expectedArch],
-      {
-        detached: true,
-        stdio: "ignore",
-        env: process.env,
-      },
-    );
-    child.unref();
-  } catch (err) {
-    console.warn(
-      "[auto-update] failed to spawn update helper:",
-      err?.message || err,
-    );
-    try {
-      fs.unlinkSync(scriptPath);
-    } catch {
-      /* ignore */
-    }
-    return false;
-  }
-
-  return true;
-}
 
 /**
  * Install the downloaded update and relaunch.
- * Must run after the "Restart now" dialog has fully closed — calling
- * quitAndInstall synchronously in the dialog callback often no-ops on macOS.
+ * Starts after the "Restart now" dialog has fully closed so the Mac preflight
+ * can report refusal without disrupting the current window.
  *
  * @param {import('electron-updater').AppUpdater} autoUpdater
  * @param {{ disposeAgent?: () => void | Promise<void> }} [hooks]
  */
-export function installUpdateAndRelaunch(autoUpdater, hooks = {}) {
-  if (quittingForUpdate) return;
-  quittingForUpdate = true;
+export async function installUpdateAndRelaunch(autoUpdater, hooks = {}) {
+  if (quittingForUpdate || installStarting) return { ok: false, reason: "busy" };
+  installStarting = true;
   console.log("[auto-update] installUpdateAndRelaunch starting");
+  await new Promise((resolve) => setTimeout(resolve, 250));
 
-  disposeHooks(hooks);
-
-  // After a tick so the message box fully dismisses
-  setTimeout(() => {
+  try {
     if (process.platform === "darwin") {
-      const ok = startMacManualInstall(autoUpdater);
-      destroyAllWindows();
-      if (!ok) {
-        console.warn(
-          "[auto-update] mac manual install unavailable — trying native quitAndInstall",
-        );
-        try {
-          autoUpdater.quitAndInstall(false, true);
-        } catch (err) {
-          console.warn(
-            "[auto-update] quitAndInstall failed:",
-            err?.message || err,
-          );
-        }
-        // Last resort: quit; user can re-open (autoInstallOnAppQuit) or use DMG
-        forceExitSoon(2000);
-        return;
+      const result = await runMacInstallTransaction({
+        prepare: () =>
+          prepareMacUpdateInstall({
+            autoUpdater,
+            downloadInfo: lastDownloadedUpdate,
+            appPath: macAppBundlePath(),
+            currentPid: process.pid,
+          }),
+        dispose: () => {
+          quittingForUpdate = true;
+          disposeHooks(hooks);
+        },
+        destroyWindows: destroyAllWindows,
+        exitSoon: () => forceExitSoon(400),
+      });
+      if (!result.ok) {
+        console.warn("[auto-update] mac install preflight refused:", result.reason, result.detail);
+        await box({
+          type: "error",
+          buttons: ["OK", "Open Releases"],
+          defaultId: 0,
+          cancelId: 0,
+          title: "Update was not installed",
+          message: result.message,
+          detail: result.detail,
+        }).then(({ response }) => {
+          if (response === 1) {
+            import("electron").then(({ shell }) => shell.openExternal(UPDATE_RELEASES_URL));
+          }
+        });
       }
-      // Helper is waiting on our PID — exit so it can replace the bundle
-      forceExitSoon(400);
-      return;
+      return result;
     }
 
-    // Windows / Linux: electron-updater NSIS / AppImage path
+    quittingForUpdate = true;
+    disposeHooks(hooks);
     destroyAllWindows();
     setTimeout(() => {
       try {
         autoUpdater.quitAndInstall(false, true);
         console.log("[auto-update] quitAndInstall called");
       } catch (err) {
-        console.warn(
-          "[auto-update] quitAndInstall failed:",
-          err?.message || err,
-        );
+        console.warn("[auto-update] quitAndInstall failed:", err?.message || err);
       }
       forceExitSoon(4000);
     }, 150);
-  }, 250);
+    return { ok: true };
+  } finally {
+    installStarting = false;
+  }
+}
+
+async function showUpdateError(err) {
+  const formatted = formatUpdateCheckError(err);
+  const { response } = await box({
+    type: "warning",
+    buttons: formatted.offerReleases ? ["OK", "Open Releases"] : ["OK"],
+    defaultId: 0,
+    cancelId: 0,
+    title: formatted.title,
+    message: formatted.message,
+    detail: formatted.detail,
+  });
+  if (response === 1 && formatted.offerReleases) {
+    const { shell } = await import("electron");
+    await shell.openExternal(formatted.releasesUrl || UPDATE_RELEASES_URL);
+  }
+  return formatted;
 }
 
 /**
@@ -480,30 +241,17 @@ function ensureWired(hooks = {}) {
   }
 
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Mac installation is gated by our receipt + bundle preflight. Do not let
+  // Squirrel install the same download later when a refused app eventually quits.
+  autoUpdater.autoInstallOnAppQuit = process.platform !== "darwin";
   // Public GitHub repo — no token required for download.
   autoUpdater.allowPrerelease = allowPrereleasePref;
 
   autoUpdater.on("error", (err) => {
     busy = false;
     console.warn("[auto-update]", err?.message || err);
-    if (suppressErrorDialog) return;
-    const formatted = formatUpdateCheckError(err);
-    void box({
-      type: "warning",
-      buttons: formatted.offerReleases ? ["OK", "Open Releases"] : ["OK"],
-      defaultId: 0,
-      cancelId: 0,
-      title: formatted.title,
-      message: formatted.message,
-      detail: formatted.detail,
-    }).then(({ response }) => {
-      if (response === 1 && formatted.offerReleases) {
-        import("electron").then(({ shell }) =>
-          shell.openExternal(formatted.releasesUrl || UPDATE_RELEASES_URL),
-        );
-      }
-    });
+    if (!shouldShowUpdaterError(interactiveUpdate)) return;
+    void showUpdateError(err);
   });
 
   autoUpdater.on("update-available", (info) => {
@@ -534,7 +282,7 @@ function ensureWired(hooks = {}) {
         "The update was downloaded in the background. Restart to apply it, or keep working and restart later.",
     });
     if (response === 0) {
-      installUpdateAndRelaunch(autoUpdater, hooks);
+      void installUpdateAndRelaunch(autoUpdater, hooks);
     }
   });
 
@@ -656,7 +404,8 @@ export async function checkForUpdatesInteractive(hooks = {}) {
   }
 
   busy = true;
-  suppressErrorDialog = true;
+  const operation = createInteractiveUpdateOperation();
+  interactiveUpdate = operation;
   try {
     // Checking dialog is non-blocking; result dialogs come after resolve.
     // Retry transient net::ERR_NETWORK_CHANGED etc. (common on Mac Wi‑Fi/VPN).
@@ -667,6 +416,15 @@ export async function checkForUpdatesInteractive(hooks = {}) {
     const updateInfo = result?.updateInfo;
     const latest = updateInfo?.version;
     const current = app.getVersion();
+    watchInteractiveDownload(result?.downloadPromise, operation, {
+      onError: async (err) => {
+        busy = false;
+        await showUpdateError(err);
+      },
+      onSettled: () => {
+        if (interactiveUpdate === operation) interactiveUpdate = null;
+      },
+    });
 
     // If download already started (update-available + autoDownload),
     // update-downloaded will prompt to restart. Avoid a second "found" dialog
@@ -704,22 +462,10 @@ export async function checkForUpdatesInteractive(hooks = {}) {
     return { ok: true, latest: current, current };
   } catch (err) {
     busy = false;
-    const formatted = formatUpdateCheckError(err);
     console.warn("[auto-update] check failed:", err?.message || err);
-    const buttons = formatted.offerReleases ? ["OK", "Open Releases"] : ["OK"];
-    const { response } = await box({
-      type: "warning",
-      buttons,
-      defaultId: 0,
-      cancelId: 0,
-      title: formatted.title,
-      message: formatted.message,
-      detail: formatted.detail,
-    });
-    if (response === 1 && formatted.offerReleases) {
-      const { shell } = await import("electron");
-      await shell.openExternal(formatted.releasesUrl || UPDATE_RELEASES_URL);
-    }
+    operation.dialogShown = true;
+    operation.phase = "done";
+    const formatted = await showUpdateError(err);
     return {
       ok: false,
       reason: "error",
@@ -727,7 +473,9 @@ export async function checkForUpdatesInteractive(hooks = {}) {
       transient: formatted.transient,
     };
   } finally {
-    suppressErrorDialog = false;
+    if (operation.phase !== "download" && interactiveUpdate === operation) {
+      interactiveUpdate = null;
+    }
   }
 }
 

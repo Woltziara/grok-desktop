@@ -48,7 +48,7 @@ export function formatUpdateCheckError(err) {
       title: "还没有新版本",
       message: "这一版还没有发布自动更新。",
       detail:
-        "当前安装的就是现在的版本。没有可安装的新包，也不会去其他仓库下载。\n\n" +
+        "这个发布源目前没有可安装的新包；这不代表本机安装已包含仓库里的最新源码。也不会去其他仓库下载。\n\n" +
         head,
       transient: false,
       offerReleases: false,
@@ -91,10 +91,12 @@ export function formatUpdateCheckError(err) {
 export function pickMacUpdateZip(input = {}) {
   const file = String(input.downloadedFile || "").trim();
   const size = Number(input.size || 0);
+  const receipt = String(input.sha512Receipt || "").trim();
+  const actual = String(input.actualSha512 || "").trim();
   if (!file || !file.endsWith(".zip")) return null;
   if (!Number.isFinite(size) || size <= 10_000) return null;
   if (!String(input.updateVersion || "").trim()) return null;
-  if (!String(input.sha512Receipt || "").trim()) return null;
+  if (!receipt || !actual || receipt !== actual) return null;
   return file;
 }
 
@@ -131,39 +133,40 @@ export function archMatches(expected, actual) {
   return tokens.includes(exp);
 }
 
-export function shouldReplaceAfterWait(processStillAlive) {
-  return processStillAlive !== true;
-}
-
 /**
- * Refuse install unless every identity field is present and matches.
- * @returns {{ ok: true } | { ok: false, reason: string }}
+ * Bind an update-downloaded event to electron-updater's exact selected file.
+ * The helper fields are populated only after electron-updater has verified and
+ * committed the download to its cache. All four copies must describe one file.
+ *
+ * @param {object} info update-downloaded event (includes downloadedFile)
+ * @param {object} helper electron-updater downloadedUpdateHelper
+ * @returns {{ ok: true, version: string, sha512Receipt: string, arch: string, url: string, downloadedFile: string } | { ok: false, reason: string }}
  */
-export function macUpdateIdentityAccepted({
-  expectedBundleId,
-  actualBundleId,
-  expectedVersion,
-  actualVersion,
-  expectedArch,
-  actualArch,
-} = {}) {
-  if (!expectedBundleId) return { ok: false, reason: "bundle-id-unreadable" };
-  if (!actualBundleId) return { ok: false, reason: "new-bundle-id-unreadable" };
-  if (expectedBundleId !== actualBundleId) return { ok: false, reason: "bundle-id-mismatch" };
-  if (!expectedVersion || !actualVersion) return { ok: false, reason: "version-missing" };
-  if (expectedVersion !== actualVersion) return { ok: false, reason: "version-mismatch" };
-  if (!expectedArch || !actualArch) return { ok: false, reason: "arch-missing" };
-  if (!archMatches(expectedArch, actualArch)) return { ok: false, reason: "arch-mismatch" };
-  return { ok: true };
-}
-
-export function updateReceiptFromDownload(info) {
+export function updateReceiptFromDownload(info, helper) {
   const version = String(info?.version || "").trim();
   const files = Array.isArray(info?.files) ? info.files : [];
-  const sha = String(files[0]?.sha512 || info?.sha512 || "").trim();
-  const url = String(files[0]?.url || files[0]?.path || "").trim();
+  const downloadedFile = String(info?.downloadedFile || "").trim();
+  const helperFile = String(helper?.file || "").trim();
+  const helperVersion = String(helper?.versionInfo?.version || "").trim();
+  const selected = helper?.fileInfo?.info;
+  const sha = String(selected?.sha512 || "").trim();
+  const url = String(selected?.url || "").trim();
+  const cachedSha = String(helper?.downloadedFileInfo?.sha512 || "").trim();
+  const cachedName = String(helper?.downloadedFileInfo?.fileName || "").trim();
+
+  if (!version || !downloadedFile || !helperFile) return { ok: false, reason: "download-path-missing" };
+  if (downloadedFile !== helperFile) return { ok: false, reason: "download-path-mismatch" };
+  if (!helperVersion || helperVersion !== version) return { ok: false, reason: "download-version-mismatch" };
+  if (!sha || !cachedSha || sha !== cachedSha) return { ok: false, reason: "download-sha-mismatch" };
+  if (!cachedName || !downloadedFile.endsWith(`/${cachedName}`)) return { ok: false, reason: "download-cache-name-mismatch" };
+  const metadataFile = files.find(
+    (file) => String(file?.url || "").trim() === url && String(file?.sha512 || "").trim() === sha,
+  );
+  if (!metadataFile) return { ok: false, reason: "selected-file-not-in-metadata" };
+  if (!/\.zip(?:$|[?#])/i.test(url)) return { ok: false, reason: "selected-file-not-zip" };
   let arch = "";
   if (/arm64/i.test(url)) arch = "arm64";
   else if (/x64|x86_64|amd64/i.test(url)) arch = "x64";
-  return { version, sha512Receipt: sha, arch, url };
+  if (!arch) return { ok: false, reason: "selected-file-arch-missing" };
+  return { ok: true, version, sha512Receipt: sha, arch, url, downloadedFile };
 }
