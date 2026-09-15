@@ -149,17 +149,11 @@ export function useProjectSession(opts: {
       openOpts?: { note?: string; openGen?: number },
     ) => {
       bindOpeningSession(res.sessionId, res.historySeq);
-      await revokeWritesThisSession();
-      void syncParkedRequestsFromMain();
-      await syncPermissionsFromMain();
-      const history = pickResumeTimeline(
-        res.history || [],
-        takeCachedTimeline?.(res.sessionId),
-        Boolean(res.turnOpen),
-      ) as TimelineItem[];
-      const bb = res.backbone ?? (await refreshBackbone(res.cwd));
-      const i = await window.grokDesktop.getInfo();
 
+      // sessions:open/project:open returning is the commit point: main is now
+      // routing prompts and events to this session. Apply that identity before
+      // optional mirrors are refreshed so a status/backbone read cannot make
+      // the renderer pretend the previous conversation is still live.
       setProject(res.cwd);
       setSessionId(res.sessionId);
       setSessions(res.sessions || []);
@@ -167,6 +161,48 @@ export function useProjectSession(opts: {
       setModelName(res.modelName || null);
       setAvailableModels(res.availableModels || []);
       clearSessionScoped();
+      setItems([]);
+
+      const refreshWarnings: string[] = [];
+      try {
+        await revokeWritesThisSession();
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        refreshWarnings.push(`Session write access could not be reset: ${msg}`);
+      }
+      try {
+        void Promise.resolve(syncParkedRequestsFromMain()).catch(() => {});
+      } catch {
+        // Parked requests are polled again by the live event hook.
+      }
+      try {
+        await syncPermissionsFromMain();
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        refreshWarnings.push(`Approvals could not be refreshed: ${msg}`);
+      }
+      const history = pickResumeTimeline(
+        res.history || [],
+        takeCachedTimeline?.(res.sessionId),
+        Boolean(res.turnOpen),
+      ) as TimelineItem[];
+      let bb = res.backbone ?? null;
+      if (!bb) {
+        try {
+          bb = await refreshBackbone(res.cwd);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          refreshWarnings.push(`Project tools could not be refreshed: ${msg}`);
+        }
+      }
+      let i: AppInfo | null = null;
+      try {
+        i = await window.grokDesktop.getInfo();
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        refreshWarnings.push(`App status could not be refreshed: ${msg}`);
+      }
+
       hydrateBackgroundTasks(res.backgroundTasks || []);
       hydrateScheduledTasks?.(res.scheduledTasks || []);
       hydrateSessionUsage(res.usage);
@@ -175,11 +211,10 @@ export function useProjectSession(opts: {
       clearPromptQueue();
       promptQueueRef.current = [];
       sendNowRef.current = null;
-      if (res.backbone) setBackbone(res.backbone);
-      else setBackbone(bb);
-      const skillN = bb.ok ? bb.skills.length : "?";
-      const mcpN = bb.ok ? bb.mcpServers.length : "?";
-      const pluginN = bb.ok ? bb.plugins.length : "?";
+      setBackbone(bb);
+      const skillN = bb?.ok ? bb.skills.length : "?";
+      const mcpN = bb?.ok ? bb.mcpServers.length : "?";
+      const pluginN = bb?.ok ? bb.plugins.length : "?";
       const runningBg = (res.backgroundTasks || []).filter(
         (t) => t.status === "running",
       ).length;
@@ -222,10 +257,12 @@ export function useProjectSession(opts: {
         setConn("online");
       }
       setOpeningLabel(null);
-      setError(res.warning || null);
-      setInfo(i);
-      setAuth(i.auth);
-      hydrateFromInfo(i);
+      setError([res.warning, ...refreshWarnings].filter(Boolean).join("\n") || null);
+      if (i) {
+        setInfo(i);
+        setAuth(i.auth);
+        hydrateFromInfo(i);
+      }
       onOpenApplied?.();
     },
     [
@@ -303,8 +340,6 @@ export function useProjectSession(opts: {
           onCheckoutConflict?.(res, cwd);
           return;
         }
-        setItems([]);
-        clearSessionScoped();
         await applyOpenResult(res, { openGen });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -374,8 +409,6 @@ export function useProjectSession(opts: {
           sessionId: sessionOpts.sessionId,
           mode: sessionOpts.mode || "resume",
         });
-        setItems([]);
-        clearSessionScoped();
         await applyOpenResult(res, {
           openGen,
           note:
